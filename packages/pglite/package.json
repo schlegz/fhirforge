@@ -1,0 +1,23 @@
+{
+  "name": "@fhirforge/pglite",
+  "version": "0.0.1",
+  "description": "In-process PGlite storage for fhirforge: real Postgres with no server, for tests and local development.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "@fhirforge/core": "workspace:*",
+    "@fhirforge/pg": "workspace:*"
+  },
+  "peerDependencies": {
+    "@electric-sql/pglite": ">=0.3"
+  }
+}

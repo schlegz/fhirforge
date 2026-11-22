@@ -1,6 +1,13 @@
 /**
  * The unscoped `fhirforge` package: one install for the common setup.
- * For now it re-exports the R4 types; `createFhirStore` and the Postgres
- * adapter will be added here as `@fhirforge/core` and `@fhirforge/pg` land.
+ *
+ * ```ts
+ * import { createFhirStore, postgresStorage, r4 } from 'fhirforge';
+ * const fhir = createFhirStore({ storage: postgresStorage(pool), fhir: r4, resources: ['Patient'] });
+ * ```
+ *
+ * For tests and local development, add `@fhirforge/pglite`.
  */
+export * from '@fhirforge/core';
+export * from '@fhirforge/pg';
 export * from '@fhirforge/r4';

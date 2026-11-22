@@ -12,9 +12,19 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
-  "keywords": ["fhir", "hl7", "healthcare", "typescript", "postgres"],
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "fhir",
+    "hl7",
+    "healthcare",
+    "typescript",
+    "postgres"
+  ],
   "dependencies": {
+    "@fhirforge/core": "workspace:*",
+    "@fhirforge/pg": "workspace:*",
     "@fhirforge/r4": "workspace:*"
   }
 }

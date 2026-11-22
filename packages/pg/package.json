@@ -1,0 +1,29 @@
+{
+  "name": "@fhirforge/pg",
+  "version": "0.0.1",
+  "description": "Postgres storage for fhirforge: JSONB resources and history in their own schema, with migrations.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@fhirforge/core": "workspace:*"
+  },
+  "peerDependencies": {
+    "pg": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
+  }
+}

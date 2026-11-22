@@ -11,8 +11,7 @@
  * temporary file, then tsc checks them all in one run.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,7 +32,9 @@ function listJson(dir: string): string[] {
   });
 }
 
-const work = mkdtempSync(join(tmpdir(), 'fhirforge-examples-'));
+// Inside the package so the temp files resolve @fhirforge/* through its node_modules.
+mkdirSync(join(pkgRoot, '.examples-tmp'), { recursive: true });
+const work = mkdtempSync(join(pkgRoot, '.examples-tmp', 'run-'));
 const sources = new Map<string, string>(); // temp file → example path
 let skipped = 0;
 for (const file of folders.flatMap(listJson)) {

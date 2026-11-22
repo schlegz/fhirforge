@@ -1,3 +1,4 @@
+import type { FhirVersionPackage } from '@fhirforge/core';
 import type { ResourceTypeMap } from './generated/resource-map.js';
 
 export type * from './generated/index.js';
@@ -9,12 +10,6 @@ export type * from './generated/index.js';
  * Pre-compiled runtime definitions (search parameters, validation rules,
  * required value sets) will be added here as `core` needs them.
  */
-export interface FhirVersionPackage<TMap> {
-  readonly fhirVersion: string;
-  /** Type-only marker carrying the resource map; never read at runtime. */
-  readonly __resources?: TMap;
-}
-
 export const r4: FhirVersionPackage<ResourceTypeMap> = {
   fhirVersion: '4.0.1',
 };

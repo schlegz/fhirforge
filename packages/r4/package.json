@@ -12,6 +12,11 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
-  "sideEffects": false
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "dependencies": {
+    "@fhirforge/core": "workspace:*"
+  }
 }
