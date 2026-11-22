@@ -1,6 +1,6 @@
 {
   "name": "fhirforge",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Embeddable FHIR storage library for Node and TypeScript. In development.",
   "license": "Apache-2.0",
   "author": "Scott Schlegel",
