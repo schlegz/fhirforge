@@ -21,7 +21,7 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ### 1. Built-in audit table (proposed: before search chaining)
 
-An an append-only `fhir._audit` table (insert-only for the runtime role) as a ready-made `onAudit` sink, written in the same transaction as writes.
+An append-only `fhir._audit` table (insert-only for the runtime role) as a ready-made `onAudit` sink, written in the same transaction as writes.
 
 Design draft for review: [design/audit-table.md](design/audit-table.md). It closes the open decision "Audit failures on writes", which Bundles and the REST handler made bigger.
 
