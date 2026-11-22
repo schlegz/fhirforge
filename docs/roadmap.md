@@ -19,6 +19,8 @@ _Last updated: 2026-11-22, after the 0.2.0 release from CI._
 
 ### 1. Bundle transactions and batches
 
+Design draft for review: [design/bundles.md](design/bundles.md).
+
 - `transaction`: all entries in one database transaction, all-or-nothing; resolve `urn:uuid:` `fullUrl` references between entries (see `packages/r4/test/examples/bundle-transaction.json`); return a `transaction-response` Bundle.
 - `batch`: entries independent, each with its own status.
 - Every entry goes through validation (`createValidator`, before the policy), `authorize`, the version guard (`ifMatch` / `ifNoneExist`) and `onAudit`, exactly like single operations (CLAUDE.md §7).
