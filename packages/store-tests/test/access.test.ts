@@ -111,6 +111,32 @@ describe.each(backends)('authorize and onAudit on $name', (backend) => {
         expect((await fhirError(() => fhir.as({ role: 'patient' }).read('Patient', jane))).status).toBe(404);
       }
     });
+
+    it('reports a throwing policy to onPolicyError, and still denies', async () => {
+      const reported: [unknown, AuthorizeRequest<Session>][] = [];
+      const store = createFhirStore({
+        storage,
+        fhir: r4,
+        resources: ['Patient', 'Observation'],
+        authorize: async (req: AuthorizeRequest<Session>) => {
+          if (req.action === 'read') throw new Error('policy bug');
+          return true;
+        },
+        onPolicyError: (err, req) => {
+          reported.push([err, req]);
+          throw new Error('a broken hook changes nothing');
+        },
+      });
+      const err = await fhirError(() => store.as({ role: 'clinician' }).read('Patient', jane));
+      expect(err.status).toBe(404); // denied exactly as before: hidden as missing
+      expect(reported).toHaveLength(1);
+      expect((reported[0]![0] as Error).message).toBe('policy bug');
+      expect(reported[0]![1]).toMatchObject({ action: 'read', resourceType: 'Patient', id: jane, ctx: { role: 'clinician' } });
+      // A policy that just says no isn't an error.
+      const quiet = createFhirStore({ storage, fhir: r4, resources: ['Patient'], authorize: () => false, onPolicyError: (e) => reported.push([e, {} as never]) });
+      await fhirError(() => quiet.as({}).read('Patient', jane));
+      expect(reported).toHaveLength(1);
+    });
   });
 
   describe('writes', () => {

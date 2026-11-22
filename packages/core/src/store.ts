@@ -254,10 +254,16 @@ export function createFhirStore<
       throw FhirError.forbidden('No caller context: use store.as(ctx) or store.asSystem(reason)');
     }
     let result: unknown;
+    const full = { ...request, ctx: scope.ctx as Ctx };
     try {
-      result = await authorize({ ...request, ctx: scope.ctx as Ctx });
-    } catch {
+      result = await authorize(full);
+    } catch (err) {
       result = false; // a policy that throws denies
+      try {
+        options.onPolicyError?.(err, full);
+      } catch {
+        // The denial stands whatever the hook does.
+      }
     }
     if (result === true) return { allowed: true as const };
     if (request.action === 'search' && result && typeof result === 'object' && 'filter' in result) {

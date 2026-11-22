@@ -91,6 +91,13 @@ export interface AccessOptions<Ctx> {
    */
   onAuditError?: (error: unknown, event: StoreAuditEvent<Ctx>) => void;
   /**
+   * Called when `authorize` throws (or rejects). The request is still denied,
+   * exactly as before; this only lets you notice policy bugs. It receives the
+   * same request the policy saw, which can include resource content: treat it
+   * as PHI if you log it. Errors thrown by this hook are ignored.
+   */
+  onPolicyError?: (error: unknown, request: AuthorizeRequest<Ctx>) => void;
+  /**
    * The built-in audit table (`fhir."_audit"`), written in the same database
    * transaction as each write, so a change and its record commit together.
    * Append-only for the runtime role (INSERT only). `onAudit` still works
