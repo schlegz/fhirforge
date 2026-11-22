@@ -1,5 +1,14 @@
 # fhirforge
 
+## 0.3.0
+
+### Patch Changes
+
+- Updated dependencies [ee3db20]
+  - @fhirforge/core@0.3.0
+  - @fhirforge/pg@0.3.0
+  - @fhirforge/r4@0.3.0
+
 ## 0.2.0
 
 ### Patch Changes
