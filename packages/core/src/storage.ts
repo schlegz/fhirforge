@@ -28,6 +28,7 @@ export interface AuditRow {
   actor?: string;
   system: boolean;
   reason?: string;
+  expungeReason?: string;
   action: StoreAction;
   resourceType: string;
   id?: string;

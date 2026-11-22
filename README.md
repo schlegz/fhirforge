@@ -100,7 +100,7 @@ const fhir = createFhirStore({
 ```
 
 - Every create, update, delete and transaction Bundle writes its audit rows **in the same database transaction** as the data: if the audit row can't be written, the change is rolled back. Reads, denials and failures are recorded with their own insert; if that fails, the operation fails (the error from the failed operation is kept in an `AggregateError`).
-- A row has the same fields as an `onAudit` event: actor (from your `actor` function; the store never stores `ctx`), `system` and reason, action, resource type, id, version, outcome, status, search parameter names and returned ids, and for Bundles the entry count. A Bundle's entry rows and its own row share an `operation_id` (also `operationId` on `onAudit` events). Never resource content, search values or error messages.
+- A row has the same fields as an `onAudit` event: actor (from your `actor` function; the store never stores `ctx`), `system` and reason, action, resource type, id, version, outcome, status, search parameter names and returned ids, for Bundles the entry count, and for expunge its reason. A Bundle's entry rows and its own row share an `operation_id` (also `operationId` on `onAudit` events). Never resource content, search values or error messages.
 - **Append-only:** triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the table, even for its owner, and the runtime role only needs `INSERT` on it (see [Storage layout](#storage-layout)). fhirforge never deletes audit rows: retention is a job for a separate privileged role (or monthly partitions, below).
 - The reason you pass to `asSystem(reason)` is stored as is: keep PHI out of it.
 
@@ -132,17 +132,26 @@ result.entry[0].response; // { status: '201 Created', location: 'Patient/…/_hi
 
 ### Expunge
 
-`delete` keeps every version (FHIR history). To remove a resource for good, for example for a data-deletion request, call `expunge`:
+`delete` keeps every version (FHIR history). To remove a resource for good, for example for a data-deletion request, enable expunge when you create the store and call it with a reason:
 
 ```ts
-await fhir.asSystem('erasure request #1234').expunge('Patient', id);
+const fhir = createFhirStore({
+  storage: postgresStorage(appPool),           // runtime role: no DELETE on resource data
+  expunge: { storage: postgresStorage(adminPool) }, // optional: a role with DELETE, used only for expunge
+  // …
+});
+
+await fhir.as(session).expunge('Patient', id, { reason: 'erasure request #1234' });
 ```
+
+- **Off by default.** Without the `expunge` option, `expunge` fails with 400. `expunge: {}` runs it on the main storage, whose role then needs `DELETE` on the resource and history tables. `expunge: { storage }` runs it on a second storage for the same schema, typically a separate pool whose role has that `DELETE`, so the everyday runtime role never can delete resource data.
+- **A reason is required** (1–1000 characters) and recorded in the audit event (`expungeReason`) and the audit table. Keep PHI out of it: use a ticket or request number.
 
 - It removes the current version, every history version and every search index row in one transaction. Afterwards, `read`, `vread` and `history` return 404 and the id can be reused. It works on deleted resources too.
 - It's its own operation: `delete` never expunges. Your policy decides on it (action `expunge`, with the latest content); denied looks like missing (404). It's pinned like other writes: if the resource changes after the policy check, or `ifMatch` doesn't match, it fails with 412 and removes nothing.
 - It's audited (action `expunge`). Audit events and audit-table rows about the resource are **kept**: they hold ids, not content, and audit retention usually outlives the data.
 - It isn't exposed by the REST handler: call it from trusted server code.
-- The runtime database role needs `DELETE` on the resource and history tables to expunge (see [Storage layout](#storage-layout)). Without that grant, expunge fails and nothing else is affected.
+- Grants: see [Storage layout](#storage-layout). Without them, expunge fails with a permission error and nothing is removed.
 
 ### REST API
 
@@ -225,8 +234,8 @@ GRANT SELECT, INSERT, UPDATE ON fhir."Patient", fhir."Patient_history" TO app_ru
 GRANT SELECT, INSERT, UPDATE, DELETE ON fhir."Patient_string", fhir."Patient_token", fhir."Patient_date",
   fhir."Patient_reference", fhir."Patient_number", fhir."Patient_quantity", fhir."Patient_uri" TO app_runtime;
 GRANT INSERT ON fhir."_audit" TO app_runtime;
--- Only if the app uses expunge:
-GRANT DELETE ON fhir."Patient", fhir."Patient_history" TO app_runtime;
+-- Only for expunge, on the role of the expunge storage (a separate role if you pass `expunge: { storage }`):
+GRANT DELETE ON fhir."Patient", fhir."Patient_history" TO app_expunge;
 ```
 
 The audit table grows without bound. To manage retention by dropping old partitions instead of deleting rows, create `fhir."_audit"` yourself as a table partitioned by `recorded` (same columns) before the first `migrate()`: the migration only creates it if it doesn't exist. When a migration adds index tables, `migrate()` indexes existing resources automatically.
@@ -282,7 +291,7 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 - The REST handler (`@fhirforge/http`, both the fetch-style and the Node adapter) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
-- `expunge` removes a resource's every version and index row in one transaction (history and index rows are copies of PHI), as its own policy-checked, audited operation; audit rows are kept.
+- `expunge` (off unless enabled) removes a resource's every version and index row in one transaction (history and index rows are copies of PHI), as its own policy-checked operation with a required reason, audited; audit rows are kept. It can run on its own connection, so the everyday runtime role never needs `DELETE` on resource data.
 - The optional audit table records every operation append-only, and writes a change and its audit row in one database transaction, so a committed change always has its record.
 
 What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: field-level encryption and blind (keyed-hash) search indexes. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.

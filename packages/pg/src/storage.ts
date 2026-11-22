@@ -121,8 +121,8 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
   // ---- audit table ----
 
   const auditTable = `${ident(schema)}."_audit"`;
-  const AUDIT_COLUMNS = 13;
-  const AUDIT_CASTS = ['::uuid', '', '', '', '', '', '', '::bigint', '', '::integer', '::text[]', '::text[]', '::integer'];
+  const AUDIT_COLUMNS = 14;
+  const AUDIT_CASTS = ['::uuid', '', '', '', '', '', '', '::bigint', '', '::integer', '::text[]', '::text[]', '::integer', ''];
 
   /** Inserts audit rows (no RETURNING: the runtime role can't read the table). */
   const insertAudit = async (tx: SqlClient, rows: readonly (AuditRow & { versionId?: string })[]) => {
@@ -143,12 +143,13 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
         r.params ? [...r.params] : null,
         r.ids ? [...r.ids] : null,
         r.entries ?? null,
+        r.expungeReason ?? null,
       );
       const placeholders = AUDIT_CASTS.map((cast, c) => '$' + String(n * AUDIT_COLUMNS + c + 1) + cast);
       return `(${placeholders.join(', ')})`;
     });
     await tx.query(
-      `INSERT INTO ${auditTable} (operation_id, actor, system, reason, action, resource_type, resource_id, version_id, outcome, status, params, result_ids, entries)
+      `INSERT INTO ${auditTable} (operation_id, actor, system, reason, action, resource_type, resource_id, version_id, outcome, status, params, result_ids, entries, expunge_reason)
        VALUES ${values.join(', ')}`,
       params,
     );

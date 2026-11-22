@@ -36,6 +36,11 @@ export async function bundles(): Promise<void> {
 
   // delete takes an optional If-Match.
   await fhir.delete('Patient', '1', { ifMatch: 'W/"2"' });
+
+  // expunge always needs a reason.
+  await fhir.expunge('Patient', '1', { reason: 'erasure request' });
+  // @ts-expect-error a reason is required
+  await fhir.expunge('Patient', '1');
 }
 
 export async function includes(): Promise<void> {

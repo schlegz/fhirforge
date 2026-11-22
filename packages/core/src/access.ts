@@ -59,6 +59,8 @@ export interface StoreAuditEvent<Ctx> {
   system: boolean;
   /** The reason passed to `asSystem`. */
   reason?: string;
+  /** For `expunge`: the reason passed to it (required). */
+  expungeReason?: string;
   action: StoreAction;
   resourceType: string;
   id?: string;

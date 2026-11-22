@@ -184,7 +184,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | Built-in append-only audit table (`audit: { table: true, actor }`): rows written in the write's transaction; INSERT-only for the runtime role; triggers refuse UPDATE / DELETE / TRUNCATE | In place (tested in `audit.test.ts`, including a restricted role on Postgres) |
 | Field-level encryption (`encryptor` hook, envelope encryption, key ID per row) | Planned |
 | Per-search-parameter index policy | Partly: `plaintext` and `none` in place; `blind` planned (rejected at `createFhirStore`) |
-| Expunge (`expunge(type, id)`: every version and index row in one transaction, row locked, pinned, policy action `expunge`, audited; audit rows kept) | In place (tested in `expunge.test.ts`, including grants on Postgres) |
+| Expunge (`expunge(type, id, { reason })`, opt-in via `createFhirStore({ expunge })`, optionally on its own privileged storage): every version and index row in one transaction, row locked, pinned, policy action `expunge`, reason required and audited; audit rows kept | In place (tested in `expunge.test.ts`, including a DELETE-less runtime role on Postgres) |
 | Multi-tenancy with Postgres row-level security | Planned (optional) |
 
 ### 1. PHI never leaves through side channels
@@ -211,7 +211,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 ### 3. Database roles and schema
 
 - All tables live in the configured schema (`fhir` by default) and never touch the app's tables.
-- Migrations need a privileged role. The runtime store must work with a role that has only `SELECT`, `INSERT`, `UPDATE` on fhirforge tables, plus `DELETE` on the search index tables (index rows are replaced on every write) and, only for apps that use expunge, `DELETE` on the resource and history tables. Don't add runtime code that needs DDL or superuser rights. Document required grants when adding tables.
+- Migrations need a privileged role. The runtime store must work with a role that has only `SELECT`, `INSERT`, `UPDATE` on fhirforge tables, plus `DELETE` on the search index tables (index rows are replaced on every write) and `DELETE` on the resource and history tables only for the role that runs expunge (the `expunge.storage` role when configured, so the runtime role can stay without it). Don't add runtime code that needs DDL or superuser rights. Document required grants when adding tables.
 - The runtime role gets `INSERT` only on `_audit`: no `SELECT`, `UPDATE` or `DELETE`. Never use `RETURNING` on audit inserts or read the table at runtime (it would need `SELECT`). `audit.test.ts` checks the documented grants with a restricted role on Postgres; update both together.
 
 ### 4. Transmission security
@@ -230,7 +230,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 
 - Every write is atomic: the current row, its history row and its search index rows are written in one transaction. With the audit table on, the operation's audit rows are written in that same transaction (`WriteOptions.audit`); keep it that way for new write paths. A Bundle transaction goes through `FhirStorage.writeAll`, which applies all its writes in one database transaction and locks rows in a fixed code-unit order (resource type, then id) so concurrent transactions can't deadlock; never sort with `localeCompare` there. `reindex` rewrites one resource per transaction with the row locked, so it never overwrites a concurrent write.
 - Index tables reference the resource row with `ON DELETE CASCADE`. Any new derived table holding resource data must do the same (or be covered by expunge explicitly).
-- History keeps PHI after update and delete. `expunge` removes every version, every search index row and every derived copy for that resource, in one transaction with the row locked, and is its own explicitly named operation (never a side effect of `delete`). It keeps audit rows. Any new table holding resource data must be covered by it (a cascading FK on the current row, or an explicit delete in `pg/src/storage.ts` `expunge`), with a test in `expunge.test.ts`.
+- History keeps PHI after update and delete. `expunge` removes every version, every search index row and every derived copy for that resource, in one transaction with the row locked, and is its own explicitly named operation (never a side effect of `delete`). It's off unless `createFhirStore({ expunge })` enables it, always needs a reason (recorded as `expungeReason`), and runs on `expunge.storage` when one is configured. It keeps audit rows. Any new table holding resource data must be covered by it (a cascading FK on the current row, or an explicit delete in `pg/src/storage.ts` `expunge`), with a test in `expunge.test.ts`.
 - Optimistic locking must stay race-free: read-then-write paths lock the row (`FOR UPDATE`) inside the transaction.
 
 ### 7. Access control and audit

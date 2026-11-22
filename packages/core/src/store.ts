@@ -39,6 +39,13 @@ export interface CreateFhirStoreOptions<V extends FhirVersionPackage<unknown>, K
   fhir: V;
   /** The resource types this store manages. Only these get tables and can be written. */
   resources: readonly K[];
+  /**
+   * Enables `expunge` (permanent removal). Off by default: without it, `expunge` fails with 400.
+   * `storage` is an optional second storage on the same schema whose database role has
+   * `DELETE` on resource and history tables, used only for expunge, so the everyday runtime
+   * role never needs `DELETE` on resource data. Without it, the main storage is used.
+   */
+  expunge?: { storage?: FhirStorage };
   search?: {
     /**
      * How each search parameter is indexed, keyed `ResourceType.code`
@@ -86,8 +93,10 @@ export interface FhirDataOperations<M> {
    * content). It's a separate, explicit operation: `delete` never expunges. The policy
    * decides with action `expunge` on the latest content; denied or missing is 404. Pass
    * `ifMatch` to fail with 412 unless the current version is the one you checked.
+   * A `reason` is required and recorded in the audit event; keep PHI out of it.
+   * Only available when the store was created with the `expunge` option.
    */
-  expunge<RT extends keyof M & string>(resourceType: RT, id: string, options?: { ifMatch?: string }): Promise<void>;
+  expunge<RT extends keyof M & string>(resourceType: RT, id: string, options: { reason: string; ifMatch?: string }): Promise<void>;
 
   /** Every version of a resource, newest first. Throws 404 if it never existed or isn't visible. */
   history<RT extends keyof M & string>(resourceType: RT, id: string): Promise<HistoryEntry<M[RT]>[]>;
@@ -158,6 +167,9 @@ function normalizeVersion(value: string | undefined): string | undefined {
   return value.trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
 }
 
+/** Longest `expunge` reason kept in audit events. */
+const MAX_REASON_LENGTH = 1000;
+
 /** FHIR id: 1–64 characters of letters, digits, `-` and `.`. */
 const ID_PATTERN = /^[A-Za-z0-9\-.]{1,64}$/;
 
@@ -195,6 +207,12 @@ export function createFhirStore<
   Ctx = unknown,
 >(options: CreateFhirStoreOptions<V, K, Ctx>): FhirStore<Pick<ResourceMapOf<V>, K>, Ctx> {
   const { storage, fhir, authorize, onAudit, onAuditError } = options;
+  if (options.expunge !== undefined) {
+    const extra = options.expunge.storage;
+    if (extra !== undefined && typeof extra?.expunge !== 'function') {
+      throw new Error('createFhirStore: `expunge.storage` must be a storage adapter (e.g. postgresStorage(adminPool, { schema }))');
+    }
+  }
   const auditTable = options.audit !== undefined;
   if (auditTable) {
     if (options.audit!.table !== true) throw new Error('createFhirStore: `audit.table` must be true (omit `audit` to run without the table)');
@@ -353,7 +371,7 @@ export function createFhirStore<
    */
   const audited = async <T>(
     scope: Scope<Ctx>,
-    base: { action: StoreAction; resourceType: string; id?: string; versionId?: string; params?: string[] },
+    base: { action: StoreAction; resourceType: string; id?: string; versionId?: string; params?: string[]; expungeReason?: string },
     run: (
       withRows: (event: Partial<EventBody<Ctx>>) => { audit?: readonly PendingAuditRow[] },
     ) => Promise<{ result: T; id?: string; versionId?: string; ids?: string[]; persisted?: boolean }>,
@@ -524,7 +542,12 @@ export function createFhirStore<
     async expunge(resourceType, id, expungeOptions) {
       checkType(resourceType);
       checkId(id);
-      return audited(scope, { action: 'expunge', resourceType, id }, async (withRows) => {
+      const reason = expungeOptions?.reason;
+      if (typeof reason !== 'string' || reason.trim() === '' || reason.length > MAX_REASON_LENGTH) {
+        throw FhirError.invalid(`expunge needs a reason (1-${MAX_REASON_LENGTH} characters)`);
+      }
+      return audited(scope, { action: 'expunge', resourceType, id, expungeReason: reason }, async (withRows) => {
+        if (!options.expunge) throw FhirError.notSupported('expunge is not enabled for this store (createFhirStore({ expunge: {} }))');
         const versions = await storage.history(resourceType, id);
         if (versions.length === 0) throw FhirError.notFound(resourceType, id);
         // The policy decides on the latest content (a deleted resource by its last version), like history.
@@ -535,7 +558,8 @@ export function createFhirStore<
         // Pinned: if the resource changed after the policy saw it, 412.
         const current = versions[0]!.versionId;
         const requested = normalizeVersion(expungeOptions?.ifMatch);
-        const removed = await storage.expunge(resourceType, id, { ifMatch: requested ?? current, ...withRows({}) });
+        // Runs on the expunge storage when configured (a role with DELETE), in one transaction there.
+        const removed = await (options.expunge.storage ?? storage).expunge(resourceType, id, { ifMatch: requested ?? current, ...withRows({}) });
         if (!removed) throw FhirError.notFound(resourceType, id); // expunged concurrently
         return { result: undefined, versionId: requested ?? current, persisted: auditTable };
       });
