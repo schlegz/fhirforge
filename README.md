@@ -2,7 +2,7 @@
 
 Embeddable FHIR storage for Node and TypeScript. Add it to any app to store, search and manage FHIR resources in your own Postgres database. It's a library, not a server: your app keeps control of the connection, transactions, auth and HTTP.
 
-> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, transaction and batch Bundles, access control and audit hooks, and a FHIR REST API (`@fhirforge/next`). Chained search and `_include` are next.
+> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, transaction and batch Bundles, access control and audit hooks, and a FHIR REST API for Next.js, Express and other frameworks (`@fhirforge/http`). Chained search and `_include` are next.
 
 ## Quick start
 
@@ -115,10 +115,10 @@ result.entry[0].response; // { status: '201 Created', location: 'Patient/…/_hi
 
 ### REST API
 
-`@fhirforge/next` serves the store over FHIR REST. In a Next.js App Router app, in `app/fhir/[[...path]]/route.ts`:
+`@fhirforge/http` serves the store over FHIR REST. `createFhirHandler` returns a fetch-style handler for frameworks built on web-standard Request/Response; `toNodeHandler` adapts it for Express and `node:http`. In a Next.js App Router app, in `app/fhir/[[...path]]/route.ts`:
 
 ```ts
-import { createFhirHandler } from '@fhirforge/next';
+import { createFhirHandler } from '@fhirforge/http';
 
 const handler = createFhirHandler({
   store, // from createFhirStore
@@ -128,6 +128,8 @@ const handler = createFhirHandler({
 
 export { handler as GET, handler as POST, handler as PUT, handler as DELETE };
 ```
+
+In Express: `app.use('/fhir', toNodeHandler(createFhirHandler({ store, basePath: '/fhir', baseUrl, context })))`. Mount it before body parsers so it reads the body with its own size limit (if a parser already ran, the parsed `req.body` is used). Set `baseUrl`: without it, links are built from the client-supplied `Host` header.
 
 - Every request runs as `store.as(ctx)`: the same validation, `authorize` policy and `onAudit` as calls in code. Without a context it gets 401 and never reaches the store. `GET /metadata` (a CapabilityStatement built from the configured types and searchable parameters) is public.
 - Routes: `POST /` for transaction and batch Bundles; `GET /Type?…` and `POST /Type/_search` for search (`searchset` Bundles with absolute `fullUrl`s and `self` / `next` links); `POST /Type`; `GET`, `PUT` and `DELETE /Type/id`; `GET /Type/id/_history` and `/_history/v`. `If-Match` maps to `ifMatch`; responses carry `ETag`, `Last-Modified` and, on create, `Location`.
@@ -183,10 +185,10 @@ The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on these tables,
 | `@fhirforge/core` | `createFhirStore`: version-neutral, typed from the version package you pass in, with `authorize` / `onAudit` hooks. No I/O of its own. |
 | `@fhirforge/pg` | Postgres storage: takes a `pg` Pool (or any `Database`), with migrations, optimistic locking, search indexes and TLS enforcement. |
 | `@fhirforge/pglite` | In-process [PGlite](https://pglite.dev) storage: real Postgres with no server, for tests and local development. |
-| `@fhirforge/next` | The FHIR REST API as a fetch-style route handler (`(Request) => Response`): Next.js App Router, and any framework with web-standard Request/Response. Depends only on `core`. |
+| `@fhirforge/http` | The FHIR REST API: a fetch-style handler (`(Request) => Response`) for Next.js App Router, Hono, Bun and Deno, plus `toNodeHandler` for Express and `node:http`. Depends only on `core`. |
 | `fhirforge` | One install for the common setup: re-exports `core`, `pg` and `r4`. |
 
-Planned: chained search and `_include`, `@fhirforge/express`.
+Planned: chained search and `_include`.
 
 ## Why the types are stricter than usual
 
@@ -220,7 +222,7 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Errors (`FhirError`) name the resource type, id, version or search parameter, never field or search values. The library doesn't log resource content.
 - Every resource is validated against the base spec before it reaches the access policy or the database. Validation issues carry element paths only, element names from the input appear only if they look like FHIR names, and nesting depth and issue count are bounded so hostile JSON can't make it do unbounded work. Primitive formats use fixed, linear-time patterns, not regexes from the definitions.
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
-- The REST handler (`@fhirforge/next`) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
+- The REST handler (`@fhirforge/http`, both the fetch-style and the Node adapter) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
 
 What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and a durable destination for audit events. Planned in fhirforge: a built-in append-only audit table, field-level encryption, blind (keyed-hash) search indexes and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.

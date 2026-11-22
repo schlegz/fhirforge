@@ -1,20 +1,32 @@
-# @fhirforge/next
+# @fhirforge/http
 
-The FHIR REST API for a fhirforge store, as a fetch-style route handler: `(request: Request) => Promise<Response>`. It uses only the web-standard `Request` and `Response`, so it works in Next.js App Router route handlers and in any framework built on them (Hono, Bun, Deno, Remix, ...). There is no dependency on Next.js.
+The FHIR REST API for a fhirforge store. `createFhirHandler` returns a fetch-style handler, `(request: Request) => Promise<Response>`, for anything built on web-standard Request/Response: Next.js App Router, Hono, Bun, Deno, Remix. `toNodeHandler` adapts it to Node's `(req, res)` for Express, Connect and `node:http`. There is no dependency on any framework.
+
+Next.js, in `app/fhir/[[...path]]/route.ts`:
 
 ```ts
-// app/fhir/[[...path]]/route.ts
-import { createFhirHandler } from '@fhirforge/next';
-import { store } from '@/lib/fhir'; // createFhirStore({ ... })
-import { sessionFrom } from '@/lib/auth';
+import { createFhirHandler } from '@fhirforge/http';
 
 const handler = createFhirHandler({
-  store,
+  store, // from createFhirStore
   basePath: '/fhir',
   context: async (request) => sessionFrom(request), // your auth; undefined → 401
 });
 
 export { handler as GET, handler as POST, handler as PUT, handler as DELETE };
+```
+
+Express (mount it before body parsers, or the parsed `req.body` is used):
+
+```ts
+import { createFhirHandler, toNodeHandler } from '@fhirforge/http';
+
+app.use('/fhir', toNodeHandler(createFhirHandler({
+  store,
+  basePath: '/fhir',
+  baseUrl: 'https://api.example.org/fhir', // links; without it they come from the client's Host header
+  context: async (request) => sessionFromHeaders(request.headers),
+})));
 ```
 
 Every request runs as `store.as(ctx)`, so your `authorize` policy, validation and `onAudit` apply exactly as in code. Requests without a context get 401 and never reach the store. `GET /metadata` is public.

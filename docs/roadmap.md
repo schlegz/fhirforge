@@ -2,7 +2,7 @@
 
 What's built, what's next and in what order, and the decisions still open. Keep this current: when you finish an item, move it to **Done** and update README.md and CLAUDE.md in the same change (CLAUDE.md, "Keeping README.md in sync"). Claude: read CLAUDE.md first; its security rules apply to everything below.
 
-_Last updated: 2026-11-22, after the REST handler (`@fhirforge/next`)._
+_Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ## Done
 
@@ -13,18 +13,13 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/next`)._
 - **Security:** TLS enforcement for remote `pg` Pools; required `authorize` policy with `as(ctx)` / `asSystem(reason)`; `onAudit`; denied reads hidden as 404; writes pinned to the approved version; errors never echo values.
 - **Runtime validation** (roadmap item 2): rules compiled from the StructureDefinitions into `@fhirforge/r4`'s `validation`, walked by `core/src/validation/`. Checks unknown elements, cardinality, types, choice elements, required `code` bindings, primitive formats and contained resources. `create` / `update` validate before the policy check; 400 with one path-only issue per problem. All 5,293 valid R4 spec examples pass; the 16 that break the base spec are rejected (`pnpm test:examples --no-types <examples package>`).
 - **Release pipeline:** Changesets, `scripts/publish.mjs` with tarball checks, `release.yml` for trusted publishing.
-- **REST API:** `@fhirforge/next`, a fetch-style route handler (`(Request) => Response`) for Next.js App Router and other web-standard frameworks. FHIR REST routes to `store.as(ctx)`, Bundles at the base URL, `searchset` / `history` Bundles, `ETag` / `Last-Modified` / `Location`, `If-Match`, a public `/metadata` CapabilityStatement, 401 without a context, `Cache-Control: no-store`, a body limit and generic 500s. Added `store.searchParameters(type)` for it.
+- **REST API:** `@fhirforge/http` (renamed from the planned `@fhirforge/next`, since it isn't Next-specific): a fetch-style handler (`(Request) => Response`) for Next.js App Router, Hono, Bun and Deno, and `toNodeHandler` for Express and `node:http`, which replaces the planned `@fhirforge/express`. FHIR REST routes to `store.as(ctx)`, Bundles at the base URL, `searchset` / `history` Bundles, `ETag` / `Last-Modified` / `Location`, `If-Match`, a public `/metadata` CapabilityStatement, 401 without a context, `Cache-Control: no-store`, a body limit and generic 500s. Added `store.searchParameters(type)` for it.
 - **Bundle transactions and batches:** `store.transaction(bundle)` / `store.batch(bundle)`, designed in [design/bundles.md](design/bundles.md) (option B: plan and authorize every entry outside the database transaction, then one `FhirStorage.writeAll`). `urn:uuid:` references resolved, rows locked in a fixed order, ≤ 100 entries and ≤ 10 searches, every entry validated, authorized, pinned and audited. `delete` gained `{ ifMatch }`.
 - **Releases from CI** (roadmap item 1): 0.2.0 (runtime validation) went out from `release.yml` on 2026-11-22 via trusted publishing, with a provenance attestation on every package. It took four attempts of the release job; what went wrong is under **Release notes for maintainers** below.
 
 ## Next, in order
 
-### 1. `@fhirforge/express`
-
-- The same REST mapping as `@fhirforge/next` for Express (and Node `http`): adapt `req` / `res` to the fetch-style handler, or share its routing. Same context, error, caching and body-limit rules (CLAUDE.md §1).
-- First publish of a new package goes out by hand before trusted publishing can be configured (README > Releasing).
-
-### 2. Search: chaining and `_include` / `_revinclude`
+### 1. Search: chaining and `_include` / `_revinclude`
 
 - `subject:Patient.name=doe`, `_include=Observation:subject`, `_revinclude=Observation:patient`.
 - Each included or chained resource is a read and goes through `authorize` (CLAUDE.md §7); limits on chain depth and include count.
@@ -35,6 +30,7 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/next`)._
 - **Expunge:** remove every version, index row and derived copy of a resource in one transaction (CLAUDE.md §6).
 - **Blind indexes:** the `blind` search policy (HMAC with an app-supplied key, exact match only).
 - **Field-level encryption:** `encryptor` hook, envelope encryption, key ID per row (CLAUDE.md §5).
+- **First publish of `@fhirforge/http`:** a new package's first version goes out by hand before trusted publishing can be configured (README > Releasing). Do it before merging the next "Version packages" PR.
 - **REST follow-ups:** `PATCH`, conditional operations, `Prefer: return=minimal`, `HEAD`, type- and system-level history and search, `_summary` / `_elements`, XML. `PUT` re-creating a deleted resource returns 200 instead of 201 (the store's `update` doesn't report `created`).
 - **Bundle follow-ups:** conditional operations (`ifNoneExist`, `PUT Type?…`; need a search in the plan step and a uniqueness guard at write time), `PATCH` entries, absolute request URLs, `prefer` return modes, and `next` links for search entries.
 - **Profiles:** generated US Core types and profile validation.

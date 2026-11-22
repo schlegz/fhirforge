@@ -1,5 +1,6 @@
 import { createFhirStore, type AuthorizeRequest, type FhirStorage, type StoreAuditEvent } from '@fhirforge/core';
-import { createFhirHandler } from '@fhirforge/next';
+import { createServer } from 'node:http';
+import { createFhirHandler, toNodeHandler, type NodeRequestLike } from '@fhirforge/http';
 import { r4 } from '@fhirforge/r4';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { backends } from './backends.js';
@@ -219,6 +220,64 @@ describe.each(backends)('HTTP handler on $name', (backend) => {
     expect(text).not.toContain('Synthetic');
     expect(JSON.parse(text).issue[0]).toEqual({ severity: 'error', code: 'exception', diagnostics: 'Internal server error' });
     expect(errors).toHaveLength(1);
+  });
+
+  describe('toNodeHandler (Express, node:http)', () => {
+    it('serves a real node:http server, streaming the request body', async () => {
+      const server = createServer(toNodeHandler(createFhirHandler({ store, basePath: '/fhir', context: () => ({ user: 'u1' }) })));
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      const { port } = server.address() as { port: number };
+      try {
+        const base = `http://127.0.0.1:${port}/fhir`;
+        const created = await fetch(`${base}/Patient`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/fhir+json' },
+          body: JSON.stringify({ resourceType: 'Patient', name: [{ family: 'Doe' }] }),
+        });
+        expect(created.status).toBe(201);
+        expect(created.headers.get('location')).toMatch(new RegExp(`^${base}/Patient/[0-9a-f-]{36}/_history/1$`));
+        expect(created.headers.get('cache-control')).toBe('no-store');
+        const page = (await (await fetch(`${base}/Patient?family=doe`)).json()) as { total: number };
+        expect(page.total).toBe(1);
+        const tooBig = await fetch(`${base}/Patient`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/fhir+json' },
+          body: 'x'.repeat(11 * 1024 * 1024),
+        });
+        expect(tooBig.status).toBe(413);
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+
+    it('works under an Express mount path and with a body parser that already ran', async () => {
+      const node = toNodeHandler(createFhirHandler({ store, basePath: '/fhir', context: () => ({ user: 'u1' }) }));
+      const response = { statusCode: 0, headers: {} as Record<string, string>, body: undefined as Uint8Array | undefined };
+      const res = {
+        get statusCode() {
+          return response.statusCode;
+        },
+        set statusCode(v: number) {
+          response.statusCode = v;
+        },
+        setHeader: (name: string, value: string) => (response.headers[name] = value),
+        end: (chunk?: Uint8Array) => (response.body = chunk),
+      };
+      // Express under app.use('/fhir', ...): req.url loses the mount path, req.originalUrl keeps it.
+      const req: NodeRequestLike = {
+        method: 'POST',
+        url: '/Patient',
+        originalUrl: '/fhir/Patient',
+        headers: { host: 'app.example.org', 'content-type': 'application/fhir+json', 'content-length': '999' },
+        body: { resourceType: 'Patient', name: [{ family: 'Parsed' }] },
+        readableEnded: true,
+        async *[Symbol.asyncIterator]() {},
+      };
+      await node(req, res);
+      expect(response.statusCode).toBe(201);
+      expect(response.headers.location).toMatch(/^http:\/\/app\.example\.org\/fhir\/Patient\//);
+      expect(JSON.parse(new TextDecoder().decode(response.body)).name[0].family).toBe('Parsed');
+    });
   });
 
   it('uses the configured public base URL for links', async () => {

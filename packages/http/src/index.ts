@@ -369,3 +369,5 @@ function resourceResponse(status: number, resource: Stored<AnyResource>, base: s
       : {}),
   });
 }
+
+export { toNodeHandler, type NodeHandler, type NodeRequestLike, type NodeResponseLike } from './node.js';

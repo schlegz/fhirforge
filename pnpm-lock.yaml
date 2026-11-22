@@ -223,7 +223,7 @@ importers:
         specifier: workspace:*
         version: link:../r4
 
-  packages/next:
+  packages/http:
     dependencies:
       '@fhirforge/core':
         specifier: workspace:*
@@ -264,9 +264,9 @@ importers:
       '@fhirforge/core':
         specifier: workspace:*
         version: link:../core
-      '@fhirforge/next':
+      '@fhirforge/http':
         specifier: workspace:*
-        version: link:../next
+        version: link:../http
       '@fhirforge/pg':
         specifier: workspace:*
         version: link:../pg

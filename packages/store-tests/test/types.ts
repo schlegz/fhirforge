@@ -2,7 +2,7 @@
 // ts-expect-error directive must fail to compile, or the build fails.
 import { createFhirStore, type BundleResponse, type FhirStorage, type Stored } from '@fhirforge/core';
 import { r4, type Bundle, type Observation, type Patient } from '@fhirforge/r4';
-import { createFhirHandler, type FhirHandler } from '@fhirforge/next';
+import { createFhirHandler, type FhirHandler } from '@fhirforge/http';
 import { expectTypeOf } from 'expect-type';
 
 declare const storage: FhirStorage;
