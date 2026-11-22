@@ -61,7 +61,29 @@ export interface FhirStorage {
 
   /** Rebuilds the index rows of every current resource of a type. Returns how many were indexed. */
   reindex(resourceType: string, index: Indexer): Promise<number>;
+
+  /**
+   * Applies every write in one database transaction, all or nothing (Bundle
+   * transactions). Each write has the same semantics and guards as the single
+   * method of its kind. Rows are locked in a fixed order (resource type, then
+   * id) so concurrent calls can't deadlock; the store never passes two writes
+   * for the same resource. Any failure rolls back every write and rethrows that
+   * write's error. Returns one result per write, in input order.
+   */
+  writeAll(writes: readonly PlannedWrite[], options?: WriteOptions): Promise<WriteResult[]>;
 }
+
+/** One write in a `writeAll` call. */
+export type PlannedWrite =
+  | { kind: 'create'; resource: AnyResource & { id: string } }
+  | { kind: 'update'; resource: AnyResource & { id: string }; ifMatch?: string; ifNoneExist?: boolean }
+  | { kind: 'delete'; resourceType: string; id: string; ifMatch?: string };
+
+/** The result of one write, like the single method of its kind returns. */
+export type WriteResult =
+  | { kind: 'create'; version: StoredVersion }
+  | { kind: 'update'; result: UpdateResult }
+  | { kind: 'delete'; version?: StoredVersion };
 
 export interface StoredVersion {
   versionId: string;

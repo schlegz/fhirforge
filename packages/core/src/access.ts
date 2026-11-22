@@ -1,8 +1,11 @@
 import type { SearchParams } from './search/query.js';
 import type { AnyResource } from './types.js';
 
-/** Every data operation the store performs. */
-export type StoreAction = 'create' | 'read' | 'vread' | 'update' | 'delete' | 'history' | 'search';
+/** Every data operation the store performs (`transaction` and `batch` are audited, never sent to `authorize`). */
+export type StoreAction = 'create' | 'read' | 'vread' | 'update' | 'delete' | 'history' | 'search' | 'transaction' | 'batch';
+
+/** The actions `authorize` is asked about. Bundles aren't authorized as a whole: each entry is. */
+export type AuthorizeAction = Exclude<StoreAction, 'transaction' | 'batch'>;
 
 /**
  * What `authorize` is asked. `resource` is the content the action touches:
@@ -12,7 +15,7 @@ export type StoreAction = 'create' | 'read' | 'vread' | 'update' | 'delete' | 'h
  */
 export interface AuthorizeRequest<Ctx> {
   ctx: Ctx;
-  action: StoreAction;
+  action: AuthorizeAction;
   resourceType: string;
   id?: string;
   resource?: AnyResource;
@@ -57,6 +60,8 @@ export interface StoreAuditEvent<Ctx> {
   params?: string[];
   /** For `search`: ids of the resources returned. */
   ids?: string[];
+  /** For `transaction` and `batch`: how many entries the Bundle had (each entry also gets its own event). */
+  entries?: number;
 }
 
 export type AuditSink<Ctx> = (event: StoreAuditEvent<Ctx>) => void | Promise<void>;

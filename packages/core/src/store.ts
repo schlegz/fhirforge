@@ -2,7 +2,22 @@ import type { AccessOptions, StoreAuditEvent, AuditOutcome, AuthorizeRequest, St
 import { FhirError } from './errors.js';
 import { extractIndexRows, type SearchPolicy } from './search/index-rows.js';
 import { parseSearch, type SearchParams } from './search/query.js';
-import type { FhirStorage, Indexer, StoredVersion } from './storage.js';
+import {
+  atEntry,
+  errorResponse,
+  MAX_BUNDLE_ENTRIES,
+  MAX_BUNDLE_SEARCHES,
+  parseEntryRequest,
+  referencesAny,
+  resolveReferences,
+  statusLine,
+  writeResponse,
+  type BundleInput,
+  type BundleResponse,
+  type BundleResponseEntry,
+  type EntryRequest,
+} from './bundle.js';
+import type { FhirStorage, Indexer, PlannedWrite, StoredVersion, UpdateResult } from './storage.js';
 import { createValidator } from './validation/validate.js';
 import type {
   AnyResource,
@@ -57,8 +72,11 @@ export interface FhirDataOperations<M> {
     options?: { ifMatch?: string },
   ): Promise<Stored<M[RT]>>;
 
-  /** Deletes a resource, keeping its history. Deleting something absent or already deleted is a no-op. */
-  delete<RT extends keyof M & string>(resourceType: RT, id: string): Promise<void>;
+  /**
+   * Deletes a resource, keeping its history. Deleting something absent or already deleted is a no-op.
+   * Pass `ifMatch` to fail with 412 unless the current version is the one you read.
+   */
+  delete<RT extends keyof M & string>(resourceType: RT, id: string, options?: { ifMatch?: string }): Promise<void>;
 
   /** Every version of a resource, newest first. Throws 404 if it never existed or isn't visible. */
   history<RT extends keyof M & string>(resourceType: RT, id: string): Promise<HistoryEntry<M[RT]>[]>;
@@ -70,6 +88,22 @@ export interface FhirDataOperations<M> {
    * Unknown parameters and malformed values throw 400.
    */
   search<RT extends keyof M & string>(resourceType: RT, params?: SearchParams): Promise<SearchResult<Stored<M[RT]>>>;
+
+  /**
+   * Runs a `transaction` Bundle: every write commits together or none does.
+   * Entries get the same validation, `authorize` checks, version guards and
+   * audit as single operations; `urn:uuid:` references between entries are
+   * resolved to the new ids. GET entries run after the commit. Throws the
+   * first failure (with its entry index); returns a `transaction-response`.
+   */
+  transaction(bundle: BundleInput): Promise<BundleResponse>;
+
+  /**
+   * Runs a `batch` Bundle: each entry is an independent single operation, and
+   * a failing entry gets its error in its own `response` without affecting the
+   * others. Returns a `batch-response`.
+   */
+  batch(bundle: BundleInput): Promise<BundleResponse>;
 }
 
 export interface FhirStore<M, Ctx = unknown> extends FhirDataOperations<M> {
@@ -269,17 +303,88 @@ export function createFhirStore<
     return v.resource;
   };
 
+  // ---- write planning: validation, policy and version guard, shared by single writes and Bundles ----
+
+  /** Checks a create; returns the write with its server-assigned id. */
+  const planCreate = async (scope: Scope<Ctx>, resource: AnyResource, id: string, validated: boolean): Promise<PlannedWrite> => {
+    const resourceType = resource.resourceType;
+    const { id: _ignored, ...rest } = resource;
+    if (!validated) validate(resourceType, rest);
+    if (!(await can(scope, { action: 'create', resourceType, resource: rest as AnyResource }))) {
+      throw forbidden('create', resourceType);
+    }
+    return { kind: 'create', resource: { ...rest, id } as AnyResource & { id: string } };
+  };
+
+  /**
+   * Checks an update: the policy sees both the stored version (may this caller change it?)
+   * and the new content. The write is pinned to exactly the version the policy approved.
+   */
+  const planUpdate = async (
+    scope: Scope<Ctx>,
+    resource: AnyResource & { id: string },
+    ifMatch: string | undefined,
+    validated: boolean,
+  ): Promise<PlannedWrite> => {
+    const { resourceType, id } = resource;
+    if (!validated) validate(resourceType, resource);
+    const requested = normalizeVersion(ifMatch);
+    const existing = await storage.read(resourceType, id);
+    const stored = existing && !existing.deleted ? existing.resource ?? undefined : undefined;
+    if (stored && !(await can(scope, { action: 'update', resourceType, id, resource: stored }))) {
+      throw hidden(resourceType, id);
+    }
+    if (!(await can(scope, { action: 'update', resourceType, id, resource }))) {
+      throw forbidden('update', resourceType);
+    }
+    const guard =
+      requested !== undefined ? { ifMatch: requested } : existing ? { ifMatch: existing.versionId } : { ifNoneExist: true };
+    return { kind: 'update', resource, ...guard };
+  };
+
+  /** Checks a delete. Returns undefined when there is nothing to delete (a no-op). */
+  const planDelete = async (
+    scope: Scope<Ctx>,
+    resourceType: string,
+    id: string,
+    ifMatch: string | undefined,
+  ): Promise<PlannedWrite | undefined> => {
+    const requested = normalizeVersion(ifMatch);
+    const existing = await storage.read(resourceType, id);
+    if (!existing || existing.deleted || !existing.resource) {
+      // Nothing to delete. With an explicit ifMatch, storage still checks it (412 if it doesn't match).
+      return requested !== undefined ? { kind: 'delete', resourceType, id, ifMatch: requested } : undefined;
+    }
+    if (!(await can(scope, { action: 'delete', resourceType, id, resource: existing.resource }))) {
+      throw hidden(resourceType, id);
+    }
+    return { kind: 'delete', resourceType, id, ifMatch: requested ?? existing.versionId };
+  };
+
+  /** A single update, returning whether it created the resource (for Bundle response codes). */
+  const updateOne = (
+    scope: Scope<Ctx>,
+    resource: AnyResource & { id: string },
+    ifMatch: string | undefined,
+  ): Promise<UpdateResult> => {
+    const resourceType = checkType(resource?.resourceType);
+    const id = checkId(resource.id);
+    return audited(scope, { action: 'update', resourceType, id }, async () => {
+      const plan = (await planUpdate(scope, resource, ifMatch, false)) as Extract<PlannedWrite, { kind: 'update' }>;
+      const { kind: _kind, resource: r, ...guard } = plan;
+      const result = await storage.update(r, { ...writeOptions, ...guard });
+      return { result, versionId: result.version.versionId };
+    });
+  };
+
   // ---- data operations, per scope ----
-  const operations = (scope: Scope<Ctx>): FhirDataOperations<Record<string, AnyResource>> => ({
+  const operations = (scope: Scope<Ctx>): FhirDataOperations<Record<string, AnyResource>> => {
+    const ops: SingleOperations = {
     async create(resource) {
       const resourceType = checkType(resource?.resourceType);
       return audited(scope, { action: 'create', resourceType }, async () => {
-        const { id: _ignored, ...rest } = resource;
-        validate(resourceType, rest);
-        if (!(await can(scope, { action: 'create', resourceType, resource: rest as AnyResource }))) {
-          throw forbidden('create', resourceType);
-        }
-        const version = await storage.create({ ...rest, id: crypto.randomUUID() }, writeOptions);
+        const plan = (await planCreate(scope, resource, crypto.randomUUID(), false)) as Extract<PlannedWrite, { kind: 'create' }>;
+        const version = await storage.create(plan.resource, writeOptions);
         return { result: version.resource as never, id: version.resource!.id, versionId: version.versionId };
       });
     },
@@ -309,38 +414,17 @@ export function createFhirStore<
     },
 
     async update(resource, updateOptions) {
-      const resourceType = checkType(resource?.resourceType);
-      const id = checkId(resource.id);
-      return audited(scope, { action: 'update', resourceType, id }, async () => {
-        validate(resourceType, resource);
-        const requested = normalizeVersion(updateOptions?.ifMatch);
-        // The policy sees both the stored version (may this caller change it?) and the new content.
-        const existing = await storage.read(resourceType, id);
-        const stored = existing && !existing.deleted ? existing.resource ?? undefined : undefined;
-        if (stored && !(await can(scope, { action: 'update', resourceType, id, resource: stored }))) {
-          throw hidden(resourceType, id);
-        }
-        if (!(await can(scope, { action: 'update', resourceType, id, resource: resource as AnyResource }))) {
-          throw forbidden('update', resourceType);
-        }
-        // Write against exactly the version the policy approved: if it changed in between, 412.
-        const guard =
-          requested !== undefined ? { ifMatch: requested } : existing ? { ifMatch: existing.versionId } : { ifNoneExist: true };
-        const { version } = await storage.update(resource as AnyResource & { id: string }, { ...writeOptions, ...guard });
-        return { result: version.resource as never, versionId: version.versionId };
-      });
+      const { version } = await updateOne(scope, resource as AnyResource & { id: string }, updateOptions?.ifMatch);
+      return version.resource as never;
     },
 
-    async delete(resourceType, id) {
+    async delete(resourceType, id, deleteOptions) {
       checkType(resourceType);
       checkId(id);
       return audited(scope, { action: 'delete', resourceType, id }, async () => {
-        const existing = await storage.read(resourceType, id);
-        if (!existing || existing.deleted || !existing.resource) return { result: undefined }; // nothing to delete
-        if (!(await can(scope, { action: 'delete', resourceType, id, resource: existing.resource }))) {
-          throw hidden(resourceType, id);
-        }
-        const version = await storage.delete(resourceType, id, { ifMatch: existing.versionId });
+        const plan = await planDelete(scope, resourceType, id, deleteOptions?.ifMatch);
+        if (!plan) return { result: undefined }; // nothing to delete
+        const version = await storage.delete(resourceType, id, { ifMatch: (plan as { ifMatch: string }).ifMatch });
         return { result: undefined, ...(version ? { versionId: version.versionId } : {}) };
       });
     },
@@ -395,7 +479,246 @@ export function createFhirStore<
         return { result, ids: resources.map((r) => r.id!) };
       });
     },
-  });
+    };
+    return {
+      ...ops,
+      transaction: (bundle) => runTransaction(scope, ops, bundle),
+      batch: (bundle) => runBatch(scope, ops, bundle),
+    };
+  };
+
+  // ---- Bundles ----
+
+  type SingleOperations = Omit<FhirDataOperations<Record<string, AnyResource>>, 'transaction' | 'batch'>;
+  type Op = Extract<StoreAction, 'create' | 'update' | 'delete' | 'read' | 'vread' | 'search'>;
+  const actionOf = (r: EntryRequest): Op =>
+    r.method === 'POST' ? 'create' : r.method === 'PUT' ? 'update' : r.method === 'DELETE' ? 'delete' : r.kind;
+  /** Processing order within a transaction (FHIR: DELETE, POST, PUT, then GET). */
+  const RANK = { DELETE: 0, POST: 1, PUT: 2, GET: 3 } as const;
+
+  /** Checks the Bundle's shape and size; validates it (batch: without the entries' resources, which are validated per entry). */
+  const checkBundle = (scope: Scope<Ctx>, bundle: BundleInput, type: 'transaction' | 'batch') => {
+    if (!bundle || typeof bundle !== 'object' || bundle.resourceType !== 'Bundle') throw FhirError.invalid('Expected a Bundle');
+    if (bundle.type !== type) throw FhirError.invalid(`Bundle.type must be ${type}`);
+    const entries = bundle.entry ?? [];
+    if (Array.isArray(entries) && entries.length > MAX_BUNDLE_ENTRIES) {
+      throw FhirError.invalid(`A Bundle may have at most ${MAX_BUNDLE_ENTRIES} entries`);
+    }
+    const shell =
+      type === 'batch' && Array.isArray(entries)
+        ? { ...bundle, entry: entries.map((e) => (e && typeof e === 'object' ? { ...e, resource: undefined } : e)) }
+        : bundle;
+    validate('Bundle', shell);
+    if (scope.kind === 'unscoped' && authorize !== 'allow-all') {
+      throw FhirError.forbidden('No caller context: use store.as(ctx) or store.asSystem(reason)');
+    }
+    return entries;
+  };
+
+  /** Runs `fn`, adding the entry index to a FhirError. */
+  const inEntry = async <T>(index: number, fn: () => T | Promise<T>): Promise<T> => {
+    try {
+      return await fn();
+    } catch (err) {
+      throw err instanceof FhirError ? atEntry(index, err) : err;
+    }
+  };
+
+  const countSearches = (requests: readonly EntryRequest[]) => {
+    if (requests.filter((r) => r.method === 'GET' && r.kind === 'search').length > MAX_BUNDLE_SEARCHES) {
+      throw FhirError.invalid(`A Bundle may have at most ${MAX_BUNDLE_SEARCHES} search entries`);
+    }
+  };
+
+  /** Runs a GET entry through the normal read / vread / search operation (checked and audited like a single call). */
+  const runGet = async (ops: SingleOperations, r: Extract<EntryRequest, { method: 'GET' }>): Promise<BundleResponseEntry> => {
+    if (r.kind === 'search') {
+      const page = await ops.search(r.resourceType, r.params);
+      const searchset = {
+        resourceType: 'Bundle',
+        type: 'searchset',
+        ...(page.total !== undefined ? { total: page.total } : {}),
+        entry: page.resources.map((resource) => ({ resource })),
+      };
+      return { resource: searchset as AnyResource, response: { status: statusLine(200) } };
+    }
+    const resource =
+      r.kind === 'read' ? await ops.read(r.resourceType, r.id) : await ops.vread(r.resourceType, r.id, r.versionId);
+    return {
+      resource,
+      response: { status: statusLine(200), etag: `W/"${resource.meta.versionId}"`, lastModified: resource.meta.lastUpdated },
+    };
+  };
+
+  const auditBundle = (scope: Scope<Ctx>, action: 'transaction' | 'batch', entries: number, err?: unknown) =>
+    audit(scope, {
+      action,
+      resourceType: 'Bundle',
+      entries,
+      ...(err === undefined ? { outcome: 'success' as const } : outcomeOf(err)),
+    });
+
+  const runTransaction = async (scope: Scope<Ctx>, ops: SingleOperations, bundle: BundleInput): Promise<BundleResponse> => {
+    const requests: EntryRequest[] = [];
+    const ids: (string | undefined)[] = [];
+    let failedAt = -1;
+    let entryCount = 0;
+    const response: BundleResponseEntry[] = [];
+    try {
+      const entries = checkBundle(scope, bundle, 'transaction');
+      entryCount = entries.length;
+
+      // 1. Parse every request; assign ids to creates; map urn:uuid fullUrls to their Type/id.
+      const targets = new Map<string, string>();
+      const written = new Set<string>();
+      for (const [i, entry] of entries.entries()) {
+        failedAt = i;
+        const r = await inEntry(i, () => {
+          const r = parseEntryRequest(entry.request, checkType, checkId);
+          if (r.method === 'POST' || r.method === 'PUT') {
+            if (!entry.resource) throw FhirError.invalid('resource is required for POST and PUT');
+            if (entry.resource.resourceType !== r.resourceType) throw FhirError.invalid('resource type does not match request.url');
+            if (r.method === 'PUT' && entry.resource.id !== r.id) throw FhirError.invalid('resource.id must match request.url');
+          }
+          if (r.method === 'PUT' || r.method === 'DELETE') {
+            const key = `${r.resourceType}/${r.id}`;
+            if (written.has(key)) throw FhirError.invalid(`${key} appears in more than one entry`);
+            written.add(key);
+          }
+          return r;
+        });
+        requests.push(r);
+        const id = r.method === 'POST' ? crypto.randomUUID() : 'id' in r ? r.id : undefined;
+        ids.push(id);
+        if (entry.fullUrl?.startsWith('urn:uuid:')) {
+          if (targets.has(entry.fullUrl)) throw atEntry(i, FhirError.invalid('fullUrl appears in more than one entry'));
+          if (r.method === 'POST' || r.method === 'PUT') targets.set(entry.fullUrl, `${r.resourceType}/${id}`);
+        }
+      }
+      countSearches(requests);
+
+      // 2. Resolve references, then check every write with the policy (DELETE, POST, PUT), writing nothing yet.
+      const order = requests.map((_, i) => i).sort((a, b) => RANK[requests[a]!.method] - RANK[requests[b]!.method] || a - b);
+      const plans: (PlannedWrite | undefined)[] = [];
+      for (const i of order) {
+        const r = requests[i]!;
+        if (r.method === 'GET') continue;
+        failedAt = i;
+        plans[i] = await inEntry(i, async () => {
+          if (r.method === 'DELETE') return planDelete(scope, r.resourceType, r.id, entries[i]!.request?.ifMatch);
+          // The Bundle was validated as a whole; rewriting urn:uuid references keeps it valid.
+          const resource = resolveReferences(entries[i]!.resource!, targets);
+          return r.method === 'POST'
+            ? planCreate(scope, resource, ids[i]!, true)
+            : planUpdate(scope, resource as AnyResource & { id: string }, entries[i]!.request?.ifMatch, true);
+        });
+      }
+      failedAt = -1;
+
+      // 3. One atomic write. Any guard failure (412) rolls back everything.
+      const writeIndexes = requests.map((_, i) => i).filter((i) => plans[i]);
+      const results = await storage.writeAll(writeIndexes.map((i) => plans[i]!), writeOptions);
+      for (const [n, i] of writeIndexes.entries()) {
+        const result = results[n]!;
+        response[i] =
+          result.kind === 'create'
+            ? writeResponse(result.version, 201)
+            : result.kind === 'update'
+              ? writeResponse(result.result.version, result.result.created ? 201 : 200)
+              : { response: { status: statusLine(204) } };
+      }
+      for (const [i, r] of requests.entries()) {
+        if (r.method === 'DELETE' && !response[i]) response[i] = { response: { status: statusLine(204) } }; // nothing to delete
+      }
+    } catch (err) {
+      // Nothing was written: every entry is audited as failed, the failing one with its own outcome.
+      for (const [i, r] of requests.entries()) {
+        await audit(scope, {
+          action: actionOf(r),
+          resourceType: r.resourceType,
+          ...(ids[i] && r.method !== 'POST' ? { id: ids[i] } : {}),
+          ...(i === failedAt ? outcomeOf(err) : { outcome: 'error' as const, status: outcomeOf(err).status }),
+        });
+      }
+      await auditBundle(scope, 'transaction', entryCount, err);
+      throw err;
+    }
+
+    // Committed. Audit each write, then run the GET entries (each checked and audited as a single read or search).
+    for (const [i, r] of requests.entries()) {
+      if (r.method === 'GET') continue;
+      const stored = response[i]!.resource;
+      await audit(scope, {
+        action: actionOf(r),
+        resourceType: r.resourceType,
+        ...(ids[i] ? { id: ids[i] } : {}),
+        ...(stored?.meta?.versionId ? { versionId: stored.meta.versionId } : {}),
+        outcome: 'success',
+      });
+    }
+    for (const [i, r] of requests.entries()) {
+      if (r.method !== 'GET') continue;
+      // After the commit a failed read can't undo the writes, so it is reported in its entry, like in a batch.
+      try {
+        response[i] = await runGet(ops, r);
+      } catch (err) {
+        if (!(err instanceof FhirError)) throw err;
+        response[i] = errorResponse(err);
+      }
+    }
+    await auditBundle(scope, 'transaction', entryCount);
+    return { resourceType: 'Bundle', type: 'transaction-response', entry: response };
+  };
+
+  const runBatch = async (scope: Scope<Ctx>, ops: SingleOperations, bundle: BundleInput): Promise<BundleResponse> => {
+    let entries: readonly NonNullable<BundleInput['entry']>[number][];
+    try {
+      entries = checkBundle(scope, bundle, 'batch');
+    } catch (err) {
+      await auditBundle(scope, 'batch', 0, err);
+      throw err;
+    }
+    const fullUrls = new Set(entries.map((e) => e.fullUrl).filter((u): u is string => typeof u === 'string'));
+    let searches = 0;
+    const response: BundleResponseEntry[] = [];
+    for (const [i, entry] of entries.entries()) {
+      try {
+        const r = parseEntryRequest(entry.request, checkType, checkId);
+        if (r.method === 'GET') {
+          if (r.kind === 'search' && ++searches > MAX_BUNDLE_SEARCHES) {
+            throw FhirError.invalid(`A Bundle may have at most ${MAX_BUNDLE_SEARCHES} search entries`);
+          }
+          response.push(await runGet(ops, r));
+          continue;
+        }
+        if (r.method === 'DELETE') {
+          await ops.delete(r.resourceType, r.id, { ifMatch: entry.request?.ifMatch });
+          response.push({ response: { status: statusLine(204) } });
+          continue;
+        }
+        const resource = entry.resource;
+        if (!resource) throw FhirError.invalid('resource is required for POST and PUT');
+        if (resource.resourceType !== r.resourceType) throw FhirError.invalid('resource type does not match request.url');
+        if (referencesAny(resource, fullUrls)) {
+          throw FhirError.invalid('batch entries cannot reference each other (use a transaction)');
+        }
+        if (r.method === 'POST') {
+          const created = await ops.create(resource as never);
+          response.push(writeResponse({ versionId: created.meta.versionId, lastUpdated: created.meta.lastUpdated, deleted: false, resource: created }, 201));
+        } else {
+          if (resource.id !== r.id) throw FhirError.invalid('resource.id must match request.url');
+          const { version, created } = await updateOne(scope, resource as AnyResource & { id: string }, entry.request?.ifMatch);
+          response.push(writeResponse(version, created ? 201 : 200));
+        }
+      } catch (err) {
+        // Only deliberate errors become an entry's response; infrastructure and audit failures fail the batch.
+        if (!(err instanceof FhirError)) throw err;
+        response.push(errorResponse(atEntry(i, err)));
+      }
+    }
+    await auditBundle(scope, 'batch', entries.length);
+    return { resourceType: 'Bundle', type: 'batch-response', entry: response };
+  };
 
   const unscoped = operations({ kind: 'unscoped' });
   const store: FhirStore<Record<string, AnyResource>, Ctx> = {

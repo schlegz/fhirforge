@@ -18,7 +18,9 @@ fhirforge/
 │   │   ├── src/search.ts                      Compiles SearchParameters into path steps → generated search-parameters.ts.
 │   │   └── src/validation.ts                  Compiles StructureDefinitions into element rules → generated validation.ts.
 │   ├── core/          @fhirforge/core         createFhirStore, FhirError, the FhirStorage contract. Version-neutral. No I/O.
-│   │   ├── src/store.ts                       Scopes (as / asSystem), authorization checks, audit, data operations.
+│   │   ├── src/store.ts                       Scopes (as / asSystem), authorization checks, audit, data operations,
+│   │   │                                      write planning (planCreate / planUpdate / planDelete), transaction / batch.
+│   │   ├── src/bundle.ts                      Bundle request parsing, urn:uuid reference resolution, response entries, limits.
 │   │   ├── src/access.ts                      authorize / onAudit types: AuthorizeRequest, StoreAuditEvent, StoreAction.
 │   │   ├── src/search/                        Index extraction (index-rows.ts), query parsing (query.ts), value
 │   │   │                                      normalization (values.ts), compiled-parameter types (types.ts).
@@ -35,6 +37,7 @@ fhirforge/
 │   ├── fhirforge/     fhirforge (unscoped)    Re-exports core, pg and r4: one install for the common setup.
 │   └── store-tests/   (private)               Integration tests on PGlite and, if configured, real Postgres:
 │                                              store.test.ts (CRUD, history, validation on write), search.test.ts,
+│                                              bundle.test.ts (transaction / batch, rollback, races, deadlock),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -163,6 +166,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | Errors never echo search values, invalid ids or invalid type names | In place (tested in `search.test.ts`) |
 | Search index rows written in the write transaction; removed by FK cascade with the resource | In place |
 | Search limits: `_count` ≤ 1000, ≤ 100 values per parameter, ≤ 50 clauses, `_offset` ≤ 100000 | In place |
+| Bundle transactions: all writes in one database transaction (`writeAll`, rows locked in a fixed order); every entry validated, authorized, pinned and audited; ≤ 100 entries, ≤ 10 searches | In place (tested in `bundle.test.ts`) |
 | `authorize` policy (required; `'allow-all'` is the explicit opt-out), `store.as(ctx)`, `store.asSystem(reason)` | In place |
 | Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
 | `onAudit` hook: every data operation, including denials and failures, without content or search values | In place |
@@ -179,6 +183,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 
 - **No logging of PHI.** Library code must not call `console.*` or write to any logger with resource content, search parameters, SQL parameters or request bodies. Build-time tools (codegen CLI) may print counts and paths only.
 - **Errors carry no PHI.** `FhirError` messages may include the resource type, id, version and search parameter name, never field values or search values. Validation issues carry the element path and a fixed reason only; element names from the input appear only if they match a strict name pattern (`SAFE_NAME` in `core/src/validation/validate.ts`). Names from the request go into messages only if they match a strict name pattern (see `safeName` in `core/src/search/query.ts`); otherwise use a placeholder. When wrapping a driver error, pass it as `cause` and write a new message; don't interpolate the driver message, which can echo values. Never put SQL parameters in an error.
+- **Bundle errors** add the entry index (`entry[3]: …`) and never echo `request.url` or `fullUrl` (they can contain identifiers).
 - **Ids can be PHI.** Server-assigned ids are random UUIDs. Client-assigned ids (update-as-create) might be MRNs or other identifiers. Treat ids as sensitive in anything that leaves the process, and recommend in docs that apps don't use real-world identifiers as ids.
 - **No PHI in telemetry.** When tracing (e.g. OpenTelemetry) is added, spans may record resource type, operation, duration and status, never ids of client-assigned resources, content or parameters.
 - **No stack traces or internals in outcomes.** OperationOutcome `diagnostics` returned to clients (HTTP adapters, later) must not include stack traces, SQL or driver messages.
@@ -190,7 +195,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 - Validate input shape before it reaches SQL (e.g. `vread` rejects non-numeric versions), so malformed input becomes a 400/404, not a database error.
 - Search SQL is built in `pg/src/search.ts` through the `Sql.bind()` helper only. A search value must never become SQL text. Parameter codes, modifiers, prefixes and sort keys are validated in `core/src/search/query.ts` against the compiled definitions and fixed allow-lists before they reach the adapter; keep it that way for new features (chaining, `_include`, composite).
 - Escape LIKE wildcards (`likeEscape`) for any pattern built from a search value, and bind range parameters lazily (only when the SQL uses them): Postgres rejects bind parameters it can't type.
-- Keep the request limits (`MAX_COUNT`, `MAX_VALUES`, `MAX_CLAUSES`, `MAX_OFFSET`) in place; new search features (chains, includes) need their own limits so one request can't make the database do unbounded work.
+- Keep the request limits (`MAX_COUNT`, `MAX_VALUES`, `MAX_CLAUSES`, `MAX_OFFSET`, `MAX_BUNDLE_ENTRIES`, `MAX_BUNDLE_SEARCHES`) in place; new search features (chains, includes) need their own limits so one request can't make the database do unbounded work.
 
 ### 3. Database roles and schema
 
@@ -212,7 +217,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 
 ### 6. Integrity, history and retention
 
-- Every write is atomic: the current row, its history row and its search index rows are written in one transaction. Keep it that way for new write paths (Bundles, audit rows). `reindex` rewrites one resource per transaction with the row locked, so it never overwrites a concurrent write.
+- Every write is atomic: the current row, its history row and its search index rows are written in one transaction. Keep it that way for new write paths (audit rows). A Bundle transaction goes through `FhirStorage.writeAll`, which applies all its writes in one database transaction and locks rows in a fixed code-unit order (resource type, then id) so concurrent transactions can't deadlock; never sort with `localeCompare` there. `reindex` rewrites one resource per transaction with the row locked, so it never overwrites a concurrent write.
 - Index tables reference the resource row with `ON DELETE CASCADE`. Any new derived table holding resource data must do the same (or be covered by expunge explicitly).
 - History keeps PHI after update and delete. When adding expunge, it must remove every version, every search index row and every derived copy for that resource, in one transaction, and be its own explicitly named operation (never a side effect of `delete`).
 - Optimistic locking must stay race-free: read-then-write paths lock the row (`FOR UPDATE`) inside the transaction.
@@ -226,12 +231,13 @@ How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these propert
 - Only `true` (or, for `search`, `{ filter }`) allows. Anything else, including a thrown error, denies.
 - The policy sees the content: the new resource for `create`; the stored resource for `read`, `vread`, `history` and `delete`; both stored and new for `update`. Check after loading, before returning or writing.
 - Denied `read`, `vread`, `history`, `update` (of a stored resource) and `delete` throw the same 404 as a missing resource. Denied `create`, `search`, and update with denied new content throw 403. Don't leak existence in error messages.
-- Writes after a policy check are pinned: `update` passes `ifMatch` (the approved version) or `ifNoneExist`, and `delete` passes `ifMatch`, so a concurrent change fails with 412. Any new write path (Bundles, patch) must do the same.
+- Writes after a policy check are pinned: `update` passes `ifMatch` (the approved version) or `ifNoneExist`, and `delete` passes `ifMatch`, so a concurrent change fails with 412. Every write path builds its write with `planCreate` / `planUpdate` / `planDelete` in `store.ts` (Bundles do too); a new one (patch) must as well.
+- Bundles: the policy and `onAudit` run outside the database transaction (plan first, then one `writeAll`), never inside it. The Bundle itself isn't authorized; each entry is, with `urn:uuid:` references already resolved. Each entry is audited as its own event, plus one `transaction` / `batch` event with the entry count; a Bundle rejected before any entry is processed (shape, validation, limits) gets only the Bundle event. In a batch, only `FhirError`s become an entry's response; anything else (including audit failures) fails the batch.
 - Search: the policy's `filter` is ANDed into the query (it can't set `_count`, `_offset` or `_sort`), and every result is checked again as a `read`. If any result is removed, `total` is omitted.
 - `onAudit` gets one `StoreAuditEvent` per data operation (success, denied, not-found, error): `ctx`, system and reason, action, resource type, id, version, outcome, status, and for searches the parameter names and returned ids. Never add resource content, search values or error messages to events.
 - If `onAudit` throws, the operation fails and the result is withheld (writes have already committed), unless the app passes `onAuditError`. Don't swallow audit errors anywhere else.
 - `migrate()` and `reindex()` are maintenance operations on the store and are not audited. Don't expose resource data through them.
-- New data operations (Bundles, `_include`, chained search, HTTP adapters) must go through the same scope, policy and audit path. An `_include`d or chained resource is a read of that resource and needs its own check.
+- New data operations (`_include`, chained search, HTTP adapters) must go through the same scope, policy and audit path. An `_include`d or chained resource is a read of that resource and needs its own check.
 
 ### 8. Test data and fixtures
 

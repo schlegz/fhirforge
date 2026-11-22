@@ -1,6 +1,13 @@
 # Design: Bundle transactions and batches
 
-Status: **draft for review** (2026-11-22). Roadmap: Next, item 1. Nothing here is implemented.
+Status: **implemented** (2026-11-22), option B. Decisions from review: option B; 100 entries and 10 searches; conditional operations left for a follow-up; the built-in audit table stays under Later; `transaction` / `batch` return the response Bundle.
+
+Where the implementation differs from the draft below:
+- The response is a structural `BundleResponse` type from `@fhirforge/core`, not R4's `Bundle` (core is version-neutral). Input accepts an R4 `Bundle` as is.
+- A Bundle rejected before any entry is processed (shape, validation, limits) gets only the Bundle audit event, no entry events.
+- A GET entry that fails after a transaction committed is reported in its own response entry (it can't undo the commit) instead of failing the call.
+- A guard failure inside `writeAll` (412) isn't tied to one entry index; its message names the resource.
+- `delete` gained `{ ifMatch }` so DELETE entries can pass `request.ifMatch`.
 
 ## Goal
 
