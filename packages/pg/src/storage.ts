@@ -2,8 +2,10 @@ import {
   FhirError,
   stampMeta,
   type AnyResource,
+  type AuditRow,
   type FhirStorage,
   type Indexer,
+  type PendingAuditRow,
   type PlannedWrite,
   type StoredVersion,
   type UpdateResult,
@@ -116,6 +118,46 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     return { versionId: String(versionId), lastUpdated, deleted, resource: stamped };
   };
 
+  // ---- audit table ----
+
+  const auditTable = `${ident(schema)}."_audit"`;
+  const AUDIT_COLUMNS = 13;
+  const AUDIT_CASTS = ['::uuid', '', '', '', '', '', '', '::bigint', '', '::integer', '::text[]', '::text[]', '::integer'];
+
+  /** Inserts audit rows (no RETURNING: the runtime role can't read the table). */
+  const insertAudit = async (tx: SqlClient, rows: readonly (AuditRow & { versionId?: string })[]) => {
+    if (rows.length === 0) return;
+    const params: unknown[] = [];
+    const values = rows.map((r, n) => {
+      params.push(
+        r.operationId,
+        r.actor ?? null,
+        r.system,
+        r.reason ?? null,
+        r.action,
+        r.resourceType,
+        r.id ?? null,
+        r.versionId ?? null,
+        r.outcome,
+        r.status ?? null,
+        r.params ? [...r.params] : null,
+        r.ids ? [...r.ids] : null,
+        r.entries ?? null,
+      );
+      const placeholders = AUDIT_CASTS.map((cast, c) => '$' + String(n * AUDIT_COLUMNS + c + 1) + cast);
+      return `(${placeholders.join(', ')})`;
+    });
+    await tx.query(
+      `INSERT INTO ${auditTable} (operation_id, actor, system, reason, action, resource_type, resource_id, version_id, outcome, status, params, result_ids, entries)
+       VALUES ${values.join(', ')}`,
+      params,
+    );
+  };
+
+  /** Audit rows for a single write, with the written version filled in. */
+  const withVersion = (rows: readonly PendingAuditRow[] | undefined, version: StoredVersion | undefined) =>
+    (rows ?? []).map(({ write: _write, ...r }) => ({ ...r, ...(version ? { versionId: version.versionId } : {}) }));
+
   // ---- writes: one implementation per kind, run inside a caller's transaction ----
 
   const applyUpdate = async (
@@ -171,8 +213,8 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
   const targetOf = (w: PlannedWrite) => (w.kind === 'delete' ? [w.resourceType, w.id] : [w.resource.resourceType, w.resource.id]);
 
   return {
-    async migrate(resourceTypes) {
-      const migrations = migrationsFor(schema, resourceTypes);
+    async migrate(resourceTypes, migrateOptions = {}) {
+      const migrations = migrationsFor(schema, resourceTypes, { audit: migrateOptions.audit === true });
       return database.transaction(async (tx) => {
         // Serialize concurrent migrations (several app instances starting at once).
         // The lock is released automatically at COMMIT or ROLLBACK.
@@ -195,20 +237,40 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
 
     create(resource, opts = {}) {
       return run(resource.resourceType, () =>
-        database.transaction((tx) => writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, opts.index)),
+        database.transaction(async (tx) => {
+          const version = await writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, opts.index);
+          await insertAudit(tx, withVersion(opts.audit, version));
+          return version;
+        }),
       );
     },
 
     update(resource, opts = {}) {
-      return run(resource.resourceType, () => database.transaction((tx) => applyUpdate(tx, resource, opts, opts.index)));
+      return run(resource.resourceType, () =>
+        database.transaction(async (tx) => {
+          const result = await applyUpdate(tx, resource, opts, opts.index);
+          await insertAudit(tx, withVersion(opts.audit, result.version));
+          return result;
+        }),
+      );
     },
 
     delete(resourceType, id, opts = {}) {
-      return run(resourceType, () => database.transaction((tx) => applyDelete(tx, resourceType, id, opts.ifMatch)));
+      return run(resourceType, () =>
+        database.transaction(async (tx) => {
+          const version = await applyDelete(tx, resourceType, id, opts.ifMatch);
+          await insertAudit(tx, withVersion(opts.audit, version));
+          return version;
+        }),
+      );
+    },
+
+    recordAudit(rows) {
+      return run('_audit', () => insertAudit(database, rows));
     },
 
     writeAll(writes, opts = {}) {
-      if (writes.length === 0) return Promise.resolve([]);
+      if (writes.length === 0 && !opts.audit?.length) return Promise.resolve([]);
       // Apply in a fixed order (type, then id) so two concurrent calls lock rows in the same order.
       const order = writes
         .map((w, i) => ({ w, i, key: targetOf(w) }))
@@ -219,10 +281,21 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
         if (seen.has(k)) throw new Error('writeAll: two writes for the same resource');
         seen.add(k);
       }
-      return run(targetOf(writes[0]!)[0]!, () =>
+      return run(writes[0] ? targetOf(writes[0])[0]! : '_audit', () =>
         database.transaction(async (tx) => {
           const results = new Array<WriteResult>(writes.length);
           for (const { w, i } of order) results[i] = await applyWrite(tx, w, opts.index);
+          const versionOf = (n: number | undefined) => {
+            const r = n === undefined ? undefined : results[n];
+            return r?.kind === 'update' ? r.result.version : r?.version;
+          };
+          await insertAudit(
+            tx,
+            (opts.audit ?? []).map(({ write, ...row }) => {
+              const v = versionOf(write);
+              return v ? { ...row, versionId: v.versionId } : row;
+            }),
+          );
           return results;
         }),
       );

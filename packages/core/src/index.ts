@@ -23,6 +23,8 @@ export {
   stampMeta,
   type FhirStorage,
   type Indexer,
+  type AuditRow,
+  type PendingAuditRow,
   type PlannedWrite,
   type StoredVersion,
   type UpdateResult,

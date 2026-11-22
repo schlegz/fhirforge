@@ -18,7 +18,7 @@ import {
   type BundleResponseEntry,
   type EntryRequest,
 } from './bundle.js';
-import type { FhirStorage, Indexer, PlannedWrite, StoredVersion, UpdateResult } from './storage.js';
+import type { AuditRow, FhirStorage, Indexer, PendingAuditRow, PlannedWrite, StoredVersion, UpdateResult } from './storage.js';
 import { createValidator } from './validation/validate.js';
 import type {
   AnyResource,
@@ -153,7 +153,12 @@ interface Scope<Ctx> {
   kind: 'caller' | 'system' | 'unscoped';
   ctx?: Ctx;
   reason?: string;
+  /** Set for the entries of a Bundle, so their audit events share the Bundle's operation id. */
+  operationId?: string;
 }
+
+/** An audit event before the scope's fields (who, when, operation) are added. */
+type EventBody<Ctx> = Omit<StoreAuditEvent<Ctx>, 'recorded' | 'ctx' | 'system' | 'reason' | 'operationId'>;
 
 /**
  * Creates a FHIR store. The resource types come from the version package, so
@@ -175,6 +180,13 @@ export function createFhirStore<
   Ctx = unknown,
 >(options: CreateFhirStoreOptions<V, K, Ctx>): FhirStore<Pick<ResourceMapOf<V>, K>, Ctx> {
   const { storage, fhir, authorize, onAudit, onAuditError } = options;
+  const auditTable = options.audit !== undefined;
+  if (auditTable) {
+    if (options.audit!.table !== true) throw new Error('createFhirStore: `audit.table` must be true (omit `audit` to run without the table)');
+    if (typeof options.audit!.actor !== 'function') {
+      throw new Error('createFhirStore: `audit.actor` is required with the audit table (map ctx to a stable, non-secret id)');
+    }
+  }
   if (authorize !== 'allow-all' && typeof authorize !== 'function') {
     throw new Error("createFhirStore: `authorize` is required: pass a policy function, or 'allow-all' to run without access control");
   }
@@ -250,7 +262,34 @@ export function createFhirStore<
   const can = async (scope: Scope<Ctx>, request: Omit<AuthorizeRequest<Ctx>, 'ctx'>) => (await decide(scope, request)).allowed;
 
   // ---- audit ----
-  const audit = async (scope: Scope<Ctx>, event: Omit<StoreAuditEvent<Ctx>, 'recorded' | 'ctx' | 'system' | 'reason'>) => {
+
+  /** The audit table row for an event. Calls the app's `audit.actor` for caller scopes. */
+  const rowFor = (scope: Scope<Ctx>, event: EventBody<Ctx>, operationId: string): AuditRow => {
+    let actor: string | undefined;
+    if (scope.kind === 'caller') {
+      actor = options.audit!.actor(scope.ctx as Ctx);
+      if (typeof actor !== 'string' || actor === '') throw new Error('fhirforge: audit.actor must return a non-empty string');
+    }
+    return {
+      operationId,
+      ...(actor !== undefined ? { actor } : {}),
+      system: scope.kind === 'system',
+      ...(scope.reason ? { reason: scope.reason } : {}),
+      ...event,
+    };
+  };
+
+  /** Rows to write together with a write (in its transaction), or undefined without the audit table. */
+  const pendingRows = (scope: Scope<Ctx>, operationId: string, events: readonly (EventBody<Ctx> & { write?: number })[]) =>
+    auditTable ? events.map(({ write, ...event }) => ({ ...rowFor(scope, event, operationId), ...(write !== undefined ? { write } : {}) })) : undefined;
+
+  /**
+   * Records one event: in the audit table (unless it was already written with the data,
+   * `persisted`) and through `onAudit`. Table failures always propagate.
+   */
+  const audit = async (scope: Scope<Ctx>, event: EventBody<Ctx>, opts: { operationId?: string; persisted?: boolean } = {}) => {
+    const operationId = opts.operationId ?? scope.operationId ?? crypto.randomUUID();
+    if (auditTable && !opts.persisted) await storage.recordAudit([rowFor(scope, event, operationId)]);
     if (!onAudit) return;
     const full: StoreAuditEvent<Ctx> = {
       recorded: new Date().toISOString(),
@@ -258,12 +297,22 @@ export function createFhirStore<
       system: scope.kind === 'system',
       ...(scope.reason ? { reason: scope.reason } : {}),
       ...event,
+      operationId,
     };
     try {
       await onAudit(full);
     } catch (err) {
       if (onAuditError) onAuditError(err, full);
       else throw new Error('fhirforge: audit failed; the operation result was withheld', { cause: err });
+    }
+  };
+
+  /** Audits a failed operation. If auditing fails too, both errors are reported. */
+  const auditFailure = async (scope: Scope<Ctx>, event: EventBody<Ctx>, err: unknown, operationId?: string) => {
+    try {
+      await audit(scope, event, operationId ? { operationId } : {});
+    } catch (auditErr) {
+      throw new AggregateError([auditErr, err], 'fhirforge: audit failed; the operation had also failed');
     }
   };
 
@@ -276,26 +325,41 @@ export function createFhirStore<
     return { outcome: 'error', status: 500 };
   };
 
-  /** Runs an operation and audits it, success or failure. Audit failures on success withhold the result. */
+  /**
+   * Runs an operation and audits it, success or failure. Audit failures on success withhold
+   * the result. A write passes `withRows(event)` into its storage call, so its success row is
+   * written in the same transaction, and returns `persisted: true`.
+   */
   const audited = async <T>(
     scope: Scope<Ctx>,
     base: { action: StoreAction; resourceType: string; id?: string; versionId?: string; params?: string[] },
-    run: () => Promise<{ result: T; id?: string; versionId?: string; ids?: string[] }>,
+    run: (
+      withRows: (event: Partial<EventBody<Ctx>>) => { audit?: readonly PendingAuditRow[] },
+    ) => Promise<{ result: T; id?: string; versionId?: string; ids?: string[]; persisted?: boolean }>,
   ): Promise<T> => {
+    const operationId = scope.operationId ?? crypto.randomUUID();
+    const withRows = (event: Partial<EventBody<Ctx>>) => {
+      const rows = pendingRows(scope, operationId, [{ ...base, outcome: 'success', ...event }]);
+      return rows ? { audit: rows } : {};
+    };
     let done: Awaited<ReturnType<typeof run>>;
     try {
-      done = await run();
+      done = await run(withRows);
     } catch (err) {
-      await audit(scope, { ...base, ...outcomeOf(err) });
+      await auditFailure(scope, { ...base, ...outcomeOf(err) }, err, operationId);
       throw err;
     }
-    await audit(scope, {
-      ...base,
-      outcome: 'success',
-      ...(done.id ? { id: done.id } : {}),
-      ...(done.versionId ? { versionId: done.versionId } : {}),
-      ...(done.ids ? { ids: done.ids } : {}),
-    });
+    await audit(
+      scope,
+      {
+        ...base,
+        outcome: 'success',
+        ...(done.id ? { id: done.id } : {}),
+        ...(done.versionId ? { versionId: done.versionId } : {}),
+        ...(done.ids ? { ids: done.ids } : {}),
+      },
+      { operationId, persisted: done.persisted === true },
+    );
     return done.result;
   };
 
@@ -376,11 +440,11 @@ export function createFhirStore<
   ): Promise<UpdateResult> => {
     const resourceType = checkType(resource?.resourceType);
     const id = checkId(resource.id);
-    return audited(scope, { action: 'update', resourceType, id }, async () => {
+    return audited(scope, { action: 'update', resourceType, id }, async (withRows) => {
       const plan = (await planUpdate(scope, resource, ifMatch, false)) as Extract<PlannedWrite, { kind: 'update' }>;
       const { kind: _kind, resource: r, ...guard } = plan;
-      const result = await storage.update(r, { ...writeOptions, ...guard });
-      return { result, versionId: result.version.versionId };
+      const result = await storage.update(r, { ...writeOptions, ...guard, ...withRows({}) });
+      return { result, versionId: result.version.versionId, persisted: auditTable };
     });
   };
 
@@ -389,10 +453,10 @@ export function createFhirStore<
     const ops: SingleOperations = {
     async create(resource) {
       const resourceType = checkType(resource?.resourceType);
-      return audited(scope, { action: 'create', resourceType }, async () => {
+      return audited(scope, { action: 'create', resourceType }, async (withRows) => {
         const plan = (await planCreate(scope, resource, crypto.randomUUID(), false)) as Extract<PlannedWrite, { kind: 'create' }>;
-        const version = await storage.create(plan.resource, writeOptions);
-        return { result: version.resource as never, id: version.resource!.id, versionId: version.versionId };
+        const version = await storage.create(plan.resource, { ...writeOptions, ...withRows({ id: plan.resource.id }) });
+        return { result: version.resource as never, id: version.resource!.id, versionId: version.versionId, persisted: auditTable };
       });
     },
 
@@ -428,11 +492,11 @@ export function createFhirStore<
     async delete(resourceType, id, deleteOptions) {
       checkType(resourceType);
       checkId(id);
-      return audited(scope, { action: 'delete', resourceType, id }, async () => {
+      return audited(scope, { action: 'delete', resourceType, id }, async (withRows) => {
         const plan = await planDelete(scope, resourceType, id, deleteOptions?.ifMatch);
-        if (!plan) return { result: undefined }; // nothing to delete
-        const version = await storage.delete(resourceType, id, { ifMatch: (plan as { ifMatch: string }).ifMatch });
-        return { result: undefined, ...(version ? { versionId: version.versionId } : {}) };
+        if (!plan) return { result: undefined }; // nothing to delete: audited on its own
+        const version = await storage.delete(resourceType, id, { ifMatch: (plan as { ifMatch: string }).ifMatch, ...withRows({}) });
+        return { result: undefined, ...(version ? { versionId: version.versionId } : {}), persisted: auditTable };
       });
     },
 
@@ -489,8 +553,8 @@ export function createFhirStore<
     };
     return {
       ...ops,
-      transaction: (bundle) => runTransaction(scope, ops, bundle),
-      batch: (bundle) => runBatch(scope, ops, bundle),
+      transaction: (bundle) => runTransaction(scope, bundle),
+      batch: (bundle) => runBatch(scope, bundle),
     };
   };
 
@@ -557,15 +621,21 @@ export function createFhirStore<
     };
   };
 
-  const auditBundle = (scope: Scope<Ctx>, action: 'transaction' | 'batch', entries: number, err?: unknown) =>
-    audit(scope, {
-      action,
-      resourceType: 'Bundle',
-      entries,
-      ...(err === undefined ? { outcome: 'success' as const } : outcomeOf(err)),
-    });
+  const bundleEvent = (action: 'transaction' | 'batch', entries: number, err?: unknown): EventBody<Ctx> => ({
+    action,
+    resourceType: 'Bundle',
+    entries,
+    ...(err === undefined ? { outcome: 'success' as const } : outcomeOf(err)),
+  });
 
-  const runTransaction = async (scope: Scope<Ctx>, ops: SingleOperations, bundle: BundleInput): Promise<BundleResponse> => {
+  /** A Bundle's scope: its entries and the Bundle share one audit operation id. */
+  const bundleScope = (scope: Scope<Ctx>): Scope<Ctx> => ({ ...scope, operationId: scope.operationId ?? crypto.randomUUID() });
+
+  const runTransaction = async (outer: Scope<Ctx>, bundle: BundleInput): Promise<BundleResponse> => {
+    const scope = bundleScope(outer);
+    const ops = operations(scope);
+    const operationId = scope.operationId!;
+    const versions: (string | undefined)[] = [];
     const requests: EntryRequest[] = [];
     const ids: (string | undefined)[] = [];
     let failedAt = -1;
@@ -622,11 +692,24 @@ export function createFhirStore<
       }
       failedAt = -1;
 
-      // 3. One atomic write. Any guard failure (412) rolls back everything.
+      // 3. One atomic write. Any guard failure (412) rolls back everything. With the audit table,
+      //    every write entry's row and the Bundle's row are written in the same transaction.
       const writeIndexes = requests.map((_, i) => i).filter((i) => plans[i]);
-      const results = await storage.writeAll(writeIndexes.map((i) => plans[i]!), writeOptions);
+      const rows = pendingRows(scope, operationId, [
+        ...requests.flatMap((r, i) => {
+          if (r.method === 'GET') return [];
+          const n = writeIndexes.indexOf(i);
+          return [{ action: actionOf(r), resourceType: r.resourceType, ...(ids[i] ? { id: ids[i] } : {}), outcome: 'success' as const, ...(n >= 0 ? { write: n } : {}) }];
+        }),
+        bundleEvent('transaction', entryCount),
+      ]);
+      const results = await storage.writeAll(
+        writeIndexes.map((i) => plans[i]!),
+        rows ? { ...writeOptions, audit: rows } : writeOptions,
+      );
       for (const [n, i] of writeIndexes.entries()) {
         const result = results[n]!;
+        versions[i] = (result.kind === 'update' ? result.result.version : result.version)?.versionId;
         response[i] =
           result.kind === 'create'
             ? writeResponse(result.version, 201)
@@ -640,28 +723,37 @@ export function createFhirStore<
     } catch (err) {
       // Nothing was written: every entry is audited as failed, the failing one with its own outcome.
       for (const [i, r] of requests.entries()) {
-        await audit(scope, {
-          action: actionOf(r),
-          resourceType: r.resourceType,
-          ...(ids[i] && r.method !== 'POST' ? { id: ids[i] } : {}),
-          ...(i === failedAt ? outcomeOf(err) : { outcome: 'error' as const, status: outcomeOf(err).status }),
-        });
+        await auditFailure(
+          scope,
+          {
+            action: actionOf(r),
+            resourceType: r.resourceType,
+            ...(ids[i] && r.method !== 'POST' ? { id: ids[i] } : {}),
+            ...(i === failedAt ? outcomeOf(err) : { outcome: 'error' as const, status: outcomeOf(err).status }),
+          },
+          err,
+        );
       }
-      await auditBundle(scope, 'transaction', entryCount, err);
+      await auditFailure(scope, bundleEvent('transaction', entryCount, err), err);
       throw err;
     }
 
-    // Committed. Audit each write, then run the GET entries (each checked and audited as a single read or search).
+    // Committed (with its audit rows, if the table is on). Report each write to onAudit, then run
+    // the GET entries (each checked and audited as a single read or search).
+    const persisted = auditTable;
     for (const [i, r] of requests.entries()) {
       if (r.method === 'GET') continue;
-      const stored = response[i]!.resource;
-      await audit(scope, {
-        action: actionOf(r),
-        resourceType: r.resourceType,
-        ...(ids[i] ? { id: ids[i] } : {}),
-        ...(stored?.meta?.versionId ? { versionId: stored.meta.versionId } : {}),
-        outcome: 'success',
-      });
+      await audit(
+        scope,
+        {
+          action: actionOf(r),
+          resourceType: r.resourceType,
+          ...(ids[i] ? { id: ids[i] } : {}),
+          ...(versions[i] ? { versionId: versions[i] } : {}),
+          outcome: 'success',
+        },
+        { persisted },
+      );
     }
     for (const [i, r] of requests.entries()) {
       if (r.method !== 'GET') continue;
@@ -673,16 +765,18 @@ export function createFhirStore<
         response[i] = errorResponse(err);
       }
     }
-    await auditBundle(scope, 'transaction', entryCount);
+    await audit(scope, bundleEvent('transaction', entryCount), { persisted });
     return { resourceType: 'Bundle', type: 'transaction-response', entry: response };
   };
 
-  const runBatch = async (scope: Scope<Ctx>, ops: SingleOperations, bundle: BundleInput): Promise<BundleResponse> => {
+  const runBatch = async (outer: Scope<Ctx>, bundle: BundleInput): Promise<BundleResponse> => {
+    const scope = bundleScope(outer);
+    const ops = operations(scope);
     let entries: readonly NonNullable<BundleInput['entry']>[number][];
     try {
       entries = checkBundle(scope, bundle, 'batch');
     } catch (err) {
-      await auditBundle(scope, 'batch', 0, err);
+      await auditFailure(scope, bundleEvent('batch', 0, err), err);
       throw err;
     }
     const fullUrls = new Set(entries.map((e) => e.fullUrl).filter((u): u is string => typeof u === 'string'));
@@ -723,7 +817,7 @@ export function createFhirStore<
         response.push(errorResponse(atEntry(i, err)));
       }
     }
-    await auditBundle(scope, 'batch', entries.length);
+    await audit(scope, bundleEvent('batch', entries.length));
     return { resourceType: 'Bundle', type: 'batch-response', entry: response };
   };
 
@@ -744,7 +838,7 @@ export function createFhirStore<
         .map((p) => ({ code: p.code, type: p.type }));
     },
     async migrate() {
-      const { applied, reindex: needsReindex } = await storage.migrate(resourceTypes);
+      const { applied, reindex: needsReindex } = await storage.migrate(resourceTypes, { audit: auditTable });
       if (!needsReindex?.length) return { applied };
       return { applied, reindexed: await reindex(needsReindex) };
     },

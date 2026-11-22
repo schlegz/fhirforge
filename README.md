@@ -2,7 +2,7 @@
 
 Embeddable FHIR storage for Node and TypeScript. Add it to any app to store, search and manage FHIR resources in your own Postgres database. It's a library, not a server: your app keeps control of the connection, transactions, auth and HTTP.
 
-> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, transaction and batch Bundles, access control and audit hooks, and a FHIR REST API for Next.js, Express and other frameworks (`@fhirforge/http`). Chained search and `_include` are next.
+> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, transaction and batch Bundles, access control, an append-only audit table, and a FHIR REST API for Next.js, Express and other frameworks (`@fhirforge/http`). Chained search and `_include` are next.
 
 ## Quick start
 
@@ -87,6 +87,23 @@ await fhir.read('Patient', id); // 403: no caller context
 
 `migrate()` and `reindex()` are maintenance operations on the store itself and aren't audited.
 
+#### Built-in audit table
+
+`onAudit` runs after a write has committed, so if your audit sink fails, the change is already made. For a record that can't go missing, turn on the audit table:
+
+```ts
+const fhir = createFhirStore({
+  storage, fhir: r4, resources: ['Patient', 'Observation'], authorize: policy,
+  audit: { table: true, actor: (ctx: Session) => ctx.userId }, // a stable, non-secret id, never a token
+  onAudit: (event) => siem.send(event), // optional, still called
+});
+```
+
+- Every create, update, delete and transaction Bundle writes its audit rows **in the same database transaction** as the data: if the audit row can't be written, the change is rolled back. Reads, denials and failures are recorded with their own insert; if that fails, the operation fails (the error from the failed operation is kept in an `AggregateError`).
+- A row has the same fields as an `onAudit` event: actor (from your `actor` function; the store never stores `ctx`), `system` and reason, action, resource type, id, version, outcome, status, search parameter names and returned ids, and for Bundles the entry count. A Bundle's entry rows and its own row share an `operation_id` (also `operationId` on `onAudit` events). Never resource content, search values or error messages.
+- **Append-only:** triggers refuse `UPDATE`, `DELETE` and `TRUNCATE` on the table, even for its owner, and the runtime role only needs `INSERT` on it (see [Storage layout](#storage-layout)). fhirforge never deletes audit rows: retention is a job for a separate privileged role (or monthly partitions, below).
+- The reason you pass to `asSystem(reason)` is stored as is: keep PHI out of it.
+
 ### Transactions and batches
 
 ```ts
@@ -170,10 +187,21 @@ Everything lives in its own schema (`fhir` by default, configurable), never mixe
 - `fhir."Patient_history"`: every version, including delete markers
 - `fhir."Patient_string"`, `_token`, `_date`, `_reference`, `_number`, `_quantity`, `_uri`: search index rows, replaced in the same transaction as each write, removed with the resource
 - `fhir."_migrations"`: applied migration ids
+- `fhir."_audit"` (with `audit: { table: true }`): the append-only audit log, one row per operation (no resource content)
 
-The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on these tables, plus `DELETE` on the index tables (index rows are replaced on every write). Only `migrate()` needs DDL rights. When a migration adds index tables, `migrate()` indexes existing resources automatically.
+The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on the resource, history and index tables, plus `DELETE` on the index tables (index rows are replaced on every write), and only `INSERT` on `_audit`: no `SELECT`, `UPDATE` or `DELETE`, so the application can't read or change the audit log. Read it with a separate auditor role. Only `migrate()` needs DDL rights.
 
-`migrate()` takes a Postgres advisory lock, so several instances starting at once are safe. To run migrations with your own tool instead, `migrationSql(['Patient', 'Observation'])` from `@fhirforge/pg` returns the same schema as plain, idempotent SQL.
+```sql
+GRANT USAGE ON SCHEMA fhir TO app_runtime;
+GRANT SELECT, INSERT, UPDATE ON fhir."Patient", fhir."Patient_history" TO app_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON fhir."Patient_string", fhir."Patient_token", fhir."Patient_date",
+  fhir."Patient_reference", fhir."Patient_number", fhir."Patient_quantity", fhir."Patient_uri" TO app_runtime;
+GRANT INSERT ON fhir."_audit" TO app_runtime;
+```
+
+The audit table grows without bound. To manage retention by dropping old partitions instead of deleting rows, create `fhir."_audit"` yourself as a table partitioned by `recorded` (same columns) before the first `migrate()`: the migration only creates it if it doesn't exist. When a migration adds index tables, `migrate()` indexes existing resources automatically.
+
+`migrate()` takes a Postgres advisory lock, so several instances starting at once are safe. To run migrations with your own tool instead, `migrationSql(['Patient', 'Observation'], { audit: true })` from `@fhirforge/pg` returns the same schema as plain, idempotent SQL.
 
 ## Packages
 
@@ -224,8 +252,9 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 - The REST handler (`@fhirforge/http`, both the fetch-style and the Node adapter) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
+- The optional audit table records every operation append-only, and writes a change and its audit row in one database transaction, so a committed change always has its record.
 
-What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and a durable destination for audit events. Planned in fhirforge: a built-in append-only audit table, field-level encryption, blind (keyed-hash) search indexes and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
+What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: field-level encryption, blind (keyed-hash) search indexes and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
 
 ## Development
 

@@ -13,19 +13,14 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 - **Security:** TLS enforcement for remote `pg` Pools; required `authorize` policy with `as(ctx)` / `asSystem(reason)`; `onAudit`; denied reads hidden as 404; writes pinned to the approved version; errors never echo values.
 - **Runtime validation** (roadmap item 2): rules compiled from the StructureDefinitions into `@fhirforge/r4`'s `validation`, walked by `core/src/validation/`. Checks unknown elements, cardinality, types, choice elements, required `code` bindings, primitive formats and contained resources. `create` / `update` validate before the policy check; 400 with one path-only issue per problem. All 5,293 valid R4 spec examples pass; the 16 that break the base spec are rejected (`pnpm test:examples --no-types <examples package>`).
 - **Release pipeline:** Changesets, `scripts/publish.mjs` with tarball checks, `release.yml` for trusted publishing.
+- **Built-in audit table:** `audit: { table: true, actor }` writes `fhir."_audit"` rows in the same database transaction as every write ([design/audit-table.md](design/audit-table.md), defaults accepted: opt-in, `actor` required, append-only triggers, no hash chain, expunge keeps audit rows, search result ids stored). INSERT-only runtime role, tested with a restricted role on Postgres. Closes the open decision "Audit failures on writes" for apps that turn it on.
 - **REST API:** `@fhirforge/http` (renamed from the planned `@fhirforge/next`, since it isn't Next-specific): a fetch-style handler (`(Request) => Response`) for Next.js App Router, Hono, Bun and Deno, and `toNodeHandler` for Express and `node:http`, which replaces the planned `@fhirforge/express`. FHIR REST routes to `store.as(ctx)`, Bundles at the base URL, `searchset` / `history` Bundles, `ETag` / `Last-Modified` / `Location`, `If-Match`, a public `/metadata` CapabilityStatement, 401 without a context, `Cache-Control: no-store`, a body limit and generic 500s. Added `store.searchParameters(type)` for it.
 - **Bundle transactions and batches:** `store.transaction(bundle)` / `store.batch(bundle)`, designed in [design/bundles.md](design/bundles.md) (option B: plan and authorize every entry outside the database transaction, then one `FhirStorage.writeAll`). `urn:uuid:` references resolved, rows locked in a fixed order, ≤ 100 entries and ≤ 10 searches, every entry validated, authorized, pinned and audited. `delete` gained `{ ifMatch }`.
 - **Releases from CI** (roadmap item 1): 0.2.0 (runtime validation) went out from `release.yml` on 2026-11-22 via trusted publishing, with a provenance attestation on every package. It took four attempts of the release job; what went wrong is under **Release notes for maintainers** below.
 
 ## Next, in order
 
-### 1. Built-in audit table (proposed: before search chaining)
-
-An append-only `fhir._audit` table (insert-only for the runtime role) as a ready-made `onAudit` sink, written in the same transaction as writes.
-
-Design draft for review: [design/audit-table.md](design/audit-table.md). It closes the open decision "Audit failures on writes", which Bundles and the REST handler made bigger.
-
-### 2. Search: chaining and `_include` / `_revinclude`
+### 1. Search: chaining and `_include` / `_revinclude`
 
 - `subject:Patient.name=doe`, `_include=Observation:subject`, `_revinclude=Observation:patient`.
 - Each included or chained resource is a read and goes through `authorize` (CLAUDE.md §7); limits on chain depth and include count.
@@ -38,6 +33,7 @@ Design draft for review: [design/audit-table.md](design/audit-table.md). It clos
 - **First publish of `@fhirforge/http`:** a new package's first version goes out by hand before trusted publishing can be configured (README > Releasing). Do it before merging the next "Version packages" PR.
 - **REST follow-ups:** `PATCH`, conditional operations, `Prefer: return=minimal`, `HEAD`, type- and system-level history and search, `_summary` / `_elements`, XML. `PUT` re-creating a deleted resource returns 200 instead of 201 (the store's `update` doesn't report `created`).
 - **Bundle follow-ups:** conditional operations (`ifNoneExist`, `PUT Type?…`; need a search in the plan step and a uniqueness guard at write time), `PATCH` entries, absolute request URLs, `prefer` return modes, and `next` links for search entries.
+- **Audit table follow-ups:** tamper evidence (hash chain, or export to an external append-only store), a helper for monthly partitions, and a read API for auditors (a separate role, never the runtime store).
 - **Profiles:** generated US Core types and profile validation.
 - **Validation gaps:** invariants (FHIRPath constraints; would need a compiled subset like search, never a runtime evaluator), reference target types (the TS types already check them), required bindings on `Coding` / `CodeableConcept` (needs system + code expansions), and value sets that can't be expanded offline (mimetypes, currencies). `unvalidatedBindings` in `@fhirforge/r4` lists the bindings.
 - **Full examples type-check:** 32 of 5,309 official R4 examples fail `pnpm test:examples` type-checking, because the types are stricter than the base spec (reference targets, a primitive's value required next to its `_extension`). Decide whether to relax the types or keep a known-failures list like the runtime check.
@@ -59,4 +55,4 @@ Learned from the 0.2.0 release (run 45072636883, four attempts):
 - **Policy errors:** an `authorize` function that throws is treated as a denial and isn't reported anywhere. Safe, but it hides policy bugs. Consider an `onPolicyError` hook or reporting it in the audit event (without the error message, which could contain PHI).
 - **Validation strictness (decided 2026-11-22):** validation is always on, with no opt-out; an opt-out can be added later without a breaking change, removing one can't. Extensions are open: any `url` is accepted, but each must be a well-formed Extension. Stored data isn't re-validated on read. Revisit if apps need to import legacy data that doesn't conform (an `asSystem` import mode would be the place, audited).
 - **Denied `create` / `search`** return 403 while denied reads return 404. Revisit if some apps need 404 everywhere.
-- **Audit failures on writes:** if `onAudit` throws after a write committed, the caller gets an error for a write that happened. Bundles make the gap bigger (a whole transaction can be committed and its result withheld). The built-in audit table (same transaction) would remove it; decided 2026-11-22 to ship Bundles first and keep the audit table under Later, but it's the strongest candidate to move up.
+- **Audit failures on writes (resolved 2026-11-22 for the audit table):** with `audit: { table: true }`, a write and its audit row commit together. Without it, `onAudit` still runs after the commit, as before. Revisit making the table required (like `authorize`) before 1.0.
