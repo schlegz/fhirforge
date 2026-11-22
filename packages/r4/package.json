@@ -1,6 +1,6 @@
 {
   "name": "@fhirforge/r4",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Strict TypeScript types for FHIR R4 (4.0.1), generated from the official definitions.",
   "license": "Apache-2.0",
   "author": "Scott Schlegel",
