@@ -1,5 +1,13 @@
 # @fhirforge/pglite
 
+## 0.2.0
+
+### Patch Changes
+
+- Updated dependencies [095b2cc]
+  - @fhirforge/core@0.2.0
+  - @fhirforge/pg@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes
