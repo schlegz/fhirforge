@@ -1,11 +1,27 @@
 // Type-level tests for the store API, checked by `pnpm test:types`. Lines with a
 // ts-expect-error directive must fail to compile, or the build fails.
-import { createFhirStore, type FhirStorage, type Stored } from '@fhirforge/core';
-import { r4, type Observation, type Patient } from '@fhirforge/r4';
+import { createFhirStore, type BundleResponse, type FhirStorage, type Stored } from '@fhirforge/core';
+import { r4, type Bundle, type Observation, type Patient } from '@fhirforge/r4';
 import { expectTypeOf } from 'expect-type';
 
 declare const storage: FhirStorage;
 const fhir = createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient', 'Observation'] });
+
+export async function bundles(): Promise<void> {
+  // An R4 Bundle is accepted as is; the result is a response Bundle.
+  const bundle: Bundle = {
+    resourceType: 'Bundle',
+    type: 'transaction',
+    entry: [{ resource: { resourceType: 'Patient', gender: 'female' }, request: { method: 'POST', url: 'Patient' } }],
+  };
+  expectTypeOf(await fhir.transaction(bundle)).toEqualTypeOf<BundleResponse>();
+  expectTypeOf(await fhir.batch(bundle)).toEqualTypeOf<BundleResponse>();
+  // @ts-expect-error not a Bundle
+  await fhir.transaction({ resourceType: 'Patient' });
+
+  // delete takes an optional If-Match.
+  await fhir.delete('Patient', '1', { ifMatch: 'W/"2"' });
+}
 
 export async function typed(): Promise<void> {
   // read() returns the version package's type for that resource.

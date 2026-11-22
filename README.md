@@ -2,7 +2,7 @@
 
 Embeddable FHIR storage for Node and TypeScript. Add it to any app to store, search and manage FHIR resources in your own Postgres database. It's a library, not a server: your app keeps control of the connection, transactions, auth and HTTP.
 
-> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, access control and audit hooks. Transactions (Bundles) and HTTP adapters are next.
+> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, transaction and batch Bundles, access control and audit hooks. HTTP adapters are next.
 
 ## Quick start
 
@@ -87,6 +87,32 @@ await fhir.read('Patient', id); // 403: no caller context
 
 `migrate()` and `reindex()` are maintenance operations on the store itself and aren't audited.
 
+### Transactions and batches
+
+```ts
+const result = await fhir.as(session).transaction({
+  resourceType: 'Bundle',
+  type: 'transaction',
+  entry: [
+    { fullUrl: 'urn:uuid:9a3c1f4e-2b7d-4c1a-8e5f-0d6b7a8c9e01',
+      resource: { resourceType: 'Patient', name: [{ family: 'Doe' }] },
+      request: { method: 'POST', url: 'Patient' } },
+    { resource: { resourceType: 'Observation', status: 'final', code: { text: 'Heart rate' },
+                  subject: { reference: 'urn:uuid:9a3c1f4e-2b7d-4c1a-8e5f-0d6b7a8c9e01' } }, // becomes Patient/<new id>
+      request: { method: 'POST', url: 'Observation' } },
+  ],
+});
+result.entry[0].response; // { status: '201 Created', location: 'Patient/…/_history/1', etag: 'W/"1"', lastModified: … }
+```
+
+- **`transaction`** commits every write or none. `urn:uuid:` references between entries are resolved to the new ids before the policy sees them, and are stored resolved. Entries run in FHIR's order (DELETE, POST, PUT, then GET), and the response lists them in request order. The first failure throws, with the entry index in the message (`entry[1]: Not allowed to create Observation`), and nothing is written.
+- **`batch`** runs each entry as an independent single operation. A failing entry gets its status and OperationOutcome in its own `response`; the others still run. Batch entries can't reference each other (use a transaction).
+- **Same checks as single operations:** every entry is validated, checked by `authorize` with the content it touches, pinned to the approved version, and audited as its own event, plus one `transaction` / `batch` event for the Bundle (with the entry count). If any resource changes between the policy check and the commit, the whole transaction fails with 412.
+- **Supported entries:** `POST Type`, `PUT Type/id` (with `ifMatch`), `DELETE Type/id` (with `ifMatch`), `GET Type/id`, `GET Type/id/_history/v` and `GET Type?params`, with relative URLs. GET entries in a transaction run after the commit, see its writes, and report a failure in their own entry (it can't undo the commit). Not supported yet (400): `PATCH`, conditional operations (`ifNoneExist`, `ifNoneMatch`, `ifModifiedSince`, `PUT Type?…`) and absolute URLs.
+- **Limits:** at most 100 entries per Bundle (`MAX_BUNDLE_ENTRIES`) and 10 search entries (`MAX_BUNDLE_SEARCHES`); each search keeps the normal search limits.
+
+`delete` also takes `{ ifMatch }`, like `update`.
+
 ### Search
 
 `search(resourceType, params)` takes FHIR search parameters as an object. Arrays are ANDed (`birthdate: ['ge1970', 'lt1980']`) and comma-separated values are ORed (`gender: 'male,female'`). Parameters come from the official SearchParameter definitions, compiled at build time.
@@ -138,7 +164,7 @@ The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on these tables,
 | `@fhirforge/pglite` | In-process [PGlite](https://pglite.dev) storage: real Postgres with no server, for tests and local development. |
 | `fhirforge` | One install for the common setup: re-exports `core`, `pg` and `r4`. |
 
-Planned: Bundle transactions, chained search and `_include`, `@fhirforge/next`, `@fhirforge/express`.
+Planned: chained search and `_include`, `@fhirforge/next`, `@fhirforge/express`.
 
 ## Why the types are stricter than usual
 
@@ -167,7 +193,7 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 
 - All SQL uses bind parameters, including every search value; table and schema names are allow-listed, and LIKE wildcards in search values are escaped.
 - Tables live in their own schema, and the runtime store never changes the schema (only `migrate()` does), so it can run under a role with data-only privileges.
-- Writes are atomic and race-free: each update or delete locks the row and writes the current version, its history and its search index rows in one transaction.
+- Writes are atomic and race-free: each update or delete locks the row and writes the current version, its history and its search index rows in one transaction. A Bundle transaction writes all its entries in one database transaction, locking rows in a fixed order so concurrent transactions can't deadlock.
 - `postgresStorage(pool)` refuses a non-TLS connection to a non-local host (`ssl`, or `sslmode=require` / `verify-ca` / `verify-full`). `{ allowInsecure: true }` overrides it for development only. A custom `Database` is your responsibility.
 - Errors (`FhirError`) name the resource type, id, version or search parameter, never field or search values. The library doesn't log resource content.
 - Every resource is validated against the base spec before it reaches the access policy or the database. Validation issues carry element paths only, element names from the input appear only if they look like FHIR names, and nesting depth and issue count are bounded so hostile JSON can't make it do unbounded work. Primitive formats use fixed, linear-time patterns, not regexes from the definitions.

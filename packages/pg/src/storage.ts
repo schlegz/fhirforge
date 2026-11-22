@@ -4,7 +4,10 @@ import {
   type AnyResource,
   type FhirStorage,
   type Indexer,
+  type PlannedWrite,
   type StoredVersion,
+  type UpdateResult,
+  type WriteResult,
 } from '@fhirforge/core';
 import { isDatabase, pgPoolDatabase, type Database, type PgPoolLike, type SqlClient } from './database.js';
 import { bootstrapStatements, isIndexMigration, migrationsFor } from './migrations.js';
@@ -113,6 +116,60 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     return { versionId: String(versionId), lastUpdated, deleted, resource: stamped };
   };
 
+  // ---- writes: one implementation per kind, run inside a caller's transaction ----
+
+  const applyUpdate = async (
+    tx: SqlClient,
+    resource: AnyResource & { id: string },
+    guard: { ifMatch?: string; ifNoneExist?: boolean },
+    index: Indexer | undefined,
+  ): Promise<UpdateResult> => {
+    const { resourceType, id } = resource;
+    const current = await lockCurrent(tx, resourceType, id);
+    if (guard.ifMatch !== undefined && guard.ifMatch !== current?.v) {
+      throw FhirError.versionConflict(resourceType, id, guard.ifMatch, current?.v);
+    }
+    if (guard.ifNoneExist && current) {
+      throw FhirError.versionConflict(resourceType, id, 'none', current.v);
+    }
+    if (!current) {
+      return { version: await writeVersion(tx, resourceType, id, 1, resource, true, index), created: true };
+    }
+    const version = await writeVersion(tx, resourceType, id, Number(current.v) + 1, resource, false, index);
+    return { version, created: current.deleted };
+  };
+
+  const applyDelete = async (
+    tx: SqlClient,
+    resourceType: string,
+    id: string,
+    ifMatch: string | undefined,
+  ): Promise<StoredVersion | undefined> => {
+    const current = await lockCurrent(tx, resourceType, id);
+    if (ifMatch !== undefined && ifMatch !== current?.v) {
+      throw FhirError.versionConflict(resourceType, id, ifMatch, current?.v);
+    }
+    if (!current || current.deleted) return undefined;
+    return writeVersion(tx, resourceType, id, Number(current.v) + 1, null, false, undefined);
+  };
+
+  const applyWrite = async (tx: SqlClient, write: PlannedWrite, index: Indexer | undefined): Promise<WriteResult> => {
+    switch (write.kind) {
+      case 'create': {
+        const { resource } = write;
+        return { kind: 'create', version: await writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, index) };
+      }
+      case 'update':
+        return { kind: 'update', result: await applyUpdate(tx, write.resource, write, index) };
+      case 'delete':
+        return { kind: 'delete', version: await applyDelete(tx, write.resourceType, write.id, write.ifMatch) };
+    }
+  };
+
+  // Code-unit order, not localeCompare: every app instance must lock rows in the same order.
+  const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const targetOf = (w: PlannedWrite) => (w.kind === 'delete' ? [w.resourceType, w.id] : [w.resource.resourceType, w.resource.id]);
+
   return {
     async migrate(resourceTypes) {
       const migrations = migrationsFor(schema, resourceTypes);
@@ -143,34 +200,30 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     },
 
     update(resource, opts = {}) {
-      const { resourceType, id } = resource;
-      return run(resourceType, () =>
-        database.transaction(async (tx) => {
-          const current = await lockCurrent(tx, resourceType, id);
-          if (opts.ifMatch !== undefined && opts.ifMatch !== current?.v) {
-            throw FhirError.versionConflict(resourceType, id, opts.ifMatch, current?.v);
-          }
-          if (opts.ifNoneExist && current) {
-            throw FhirError.versionConflict(resourceType, id, 'none', current.v);
-          }
-          if (!current) {
-            return { version: await writeVersion(tx, resourceType, id, 1, resource, true, opts.index), created: true };
-          }
-          const version = await writeVersion(tx, resourceType, id, Number(current.v) + 1, resource, false, opts.index);
-          return { version, created: current.deleted };
-        }),
-      );
+      return run(resource.resourceType, () => database.transaction((tx) => applyUpdate(tx, resource, opts, opts.index)));
     },
 
     delete(resourceType, id, opts = {}) {
-      return run(resourceType, () =>
+      return run(resourceType, () => database.transaction((tx) => applyDelete(tx, resourceType, id, opts.ifMatch)));
+    },
+
+    writeAll(writes, opts = {}) {
+      if (writes.length === 0) return Promise.resolve([]);
+      // Apply in a fixed order (type, then id) so two concurrent calls lock rows in the same order.
+      const order = writes
+        .map((w, i) => ({ w, i, key: targetOf(w) }))
+        .sort((a, b) => compare(a.key[0]!, b.key[0]!) || compare(a.key[1]!, b.key[1]!));
+      const seen = new Set<string>();
+      for (const { key } of order) {
+        const k = key.join('/');
+        if (seen.has(k)) throw new Error('writeAll: two writes for the same resource');
+        seen.add(k);
+      }
+      return run(targetOf(writes[0]!)[0]!, () =>
         database.transaction(async (tx) => {
-          const current = await lockCurrent(tx, resourceType, id);
-          if (opts.ifMatch !== undefined && opts.ifMatch !== current?.v) {
-            throw FhirError.versionConflict(resourceType, id, opts.ifMatch, current?.v);
-          }
-          if (!current || current.deleted) return undefined;
-          return writeVersion(tx, resourceType, id, Number(current.v) + 1, null, false, undefined);
+          const results = new Array<WriteResult>(writes.length);
+          for (const { w, i } of order) results[i] = await applyWrite(tx, w, opts.index);
+          return results;
         }),
       );
     },

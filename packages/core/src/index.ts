@@ -5,12 +5,30 @@ export type {
   AuditOutcome,
   AuditSink,
   AuthorizePolicy,
+  AuthorizeAction,
   AuthorizeRequest,
   AuthorizeResult,
   StoreAction,
 } from './access.js';
+export {
+  MAX_BUNDLE_ENTRIES,
+  MAX_BUNDLE_SEARCHES,
+  type BundleEntryInput,
+  type BundleInput,
+  type BundleResponse,
+  type BundleResponseEntry,
+} from './bundle.js';
 export { FhirError, isFhirError, type IssueCode, type OperationOutcomeLike, type OutcomeIssue } from './errors.js';
-export { stampMeta, type FhirStorage, type Indexer, type StoredVersion, type UpdateResult, type WriteOptions } from './storage.js';
+export {
+  stampMeta,
+  type FhirStorage,
+  type Indexer,
+  type PlannedWrite,
+  type StoredVersion,
+  type UpdateResult,
+  type WriteOptions,
+  type WriteResult,
+} from './storage.js';
 export type { AnyResource, FhirVersionPackage, HistoryEntry, MigrationResult, ResourceMapOf, SearchResult, Stored } from './types.js';
 export type { CompiledSearchParameter, PathStep, SearchParameterTable, SearchParamType, StepFilter } from './search/types.js';
 export { extractIndexRows, indexParameter, evaluatePath, BUILT_IN_PARAMETERS, type IndexRow, type SearchPolicy } from './search/index-rows.js';
