@@ -1,5 +1,13 @@
 # @fhirforge/codegen
 
+## 0.4.0
+
+### Patch Changes
+
+- Updated dependencies [8854a6e]
+  - @fhirforge/core@0.4.0
+  - @fhirforge/definitions@0.4.0
+
 ## 0.3.0
 
 ### Patch Changes
