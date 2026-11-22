@@ -121,8 +121,8 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
   // ---- audit table ----
 
   const auditTable = `${ident(schema)}."_audit"`;
-  const AUDIT_COLUMNS = 13;
-  const AUDIT_CASTS = ['::uuid', '', '', '', '', '', '', '::bigint', '', '::integer', '::text[]', '::text[]', '::integer'];
+  const AUDIT_COLUMNS = 14;
+  const AUDIT_CASTS = ['::uuid', '', '', '', '', '', '', '::bigint', '', '::integer', '::text[]', '::text[]', '::integer', ''];
 
   /** Inserts audit rows (no RETURNING: the runtime role can't read the table). */
   const insertAudit = async (tx: SqlClient, rows: readonly (AuditRow & { versionId?: string })[]) => {
@@ -143,12 +143,13 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
         r.params ? [...r.params] : null,
         r.ids ? [...r.ids] : null,
         r.entries ?? null,
+        r.expungeReason ?? null,
       );
       const placeholders = AUDIT_CASTS.map((cast, c) => '$' + String(n * AUDIT_COLUMNS + c + 1) + cast);
       return `(${placeholders.join(', ')})`;
     });
     await tx.query(
-      `INSERT INTO ${auditTable} (operation_id, actor, system, reason, action, resource_type, resource_id, version_id, outcome, status, params, result_ids, entries)
+      `INSERT INTO ${auditTable} (operation_id, actor, system, reason, action, resource_type, resource_id, version_id, outcome, status, params, result_ids, entries, expunge_reason)
        VALUES ${values.join(', ')}`,
       params,
     );
@@ -261,6 +262,27 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
           const version = await applyDelete(tx, resourceType, id, opts.ifMatch);
           await insertAudit(tx, withVersion(opts.audit, version));
           return version;
+        }),
+      );
+    },
+
+    expunge(resourceType, id, opts = {}) {
+      const t = tablesFor(schema, resourceType);
+      return run(resourceType, () =>
+        database.transaction(async (tx) => {
+          const current = await lockCurrent(tx, resourceType, id);
+          if (opts.ifMatch !== undefined && opts.ifMatch !== current?.v) {
+            throw FhirError.versionConflict(resourceType, id, opts.ifMatch, current?.v);
+          }
+          if (!current) return undefined;
+          const { rows } = await tx.query<{ n: number }>(
+            `WITH removed AS (DELETE FROM ${t.history} WHERE id = $1 RETURNING 1) SELECT count(*)::int AS n FROM removed`,
+            [id],
+          );
+          // Index rows go with the current row (ON DELETE CASCADE).
+          await tx.query(`DELETE FROM ${t.current} WHERE id = $1`, [id]);
+          await insertAudit(tx, withVersion(opts.audit, { versionId: current.v } as StoredVersion));
+          return { versions: rows[0]!.n };
         }),
       );
     },

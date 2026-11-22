@@ -116,6 +116,11 @@ $$`,
         `CREATE OR REPLACE TRIGGER "_audit_no_truncate" BEFORE TRUNCATE ON ${table} FOR EACH STATEMENT EXECUTE FUNCTION ${fn}()`,
       ],
     },
+    {
+      // The reason required by expunge. Adding a column isn't blocked by the row triggers.
+      id: 'audit:2',
+      statements: [`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS expunge_reason text`],
+    },
   ];
 }
 

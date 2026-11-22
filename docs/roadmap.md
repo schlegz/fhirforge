@@ -13,6 +13,7 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 - **Security:** TLS enforcement for remote `pg` Pools; required `authorize` policy with `as(ctx)` / `asSystem(reason)`; `onAudit`; denied reads hidden as 404; writes pinned to the approved version; errors never echo values.
 - **Runtime validation** (roadmap item 2): rules compiled from the StructureDefinitions into `@fhirforge/r4`'s `validation`, walked by `core/src/validation/`. Checks unknown elements, cardinality, types, choice elements, required `code` bindings, primitive formats and contained resources. `create` / `update` validate before the policy check; 400 with one path-only issue per problem. All 5,293 valid R4 spec examples pass; the 16 that break the base spec are rejected (`pnpm test:examples --no-types <examples package>`).
 - **Release pipeline:** Changesets, `scripts/publish.mjs` with tarball checks, `release.yml` for trusted publishing.
+- **Expunge:** `expunge(type, id, { reason })` removes every version and index row in one transaction, pinned and policy-checked (action `expunge`), with a required reason, audited, audit rows kept. Off unless `createFhirStore({ expunge })` enables it; `expunge: { storage }` runs it on a separate privileged connection so the runtime role never needs `DELETE` on resource data. Not exposed over REST.
 - **Chained search and `_include` / `_revinclude`** ([design/search-links.md](design/search-links.md)): one chain level, resolved as a policy-checked search on the target type; includes as policy-checked reads and searches; limits on chains, chain matches, include parameters and included resources. The REST handler returns includes as `include` entries and advertises `searchInclude` / `searchRevInclude`.
 - **Built-in audit table:** `audit: { table: true, actor }` writes `fhir."_audit"` rows in the same database transaction as every write ([design/audit-table.md](design/audit-table.md), defaults accepted: opt-in, `actor` required, append-only triggers, no hash chain, expunge keeps audit rows, search result ids stored). INSERT-only runtime role, tested with a restricted role on Postgres. Closes the open decision "Audit failures on writes" for apps that turn it on.
 - **REST API:** `@fhirforge/http` (renamed from the planned `@fhirforge/next`, since it isn't Next-specific): a fetch-style handler (`(Request) => Response`) for Next.js App Router, Hono, Bun and Deno, and `toNodeHandler` for Express and `node:http`, which replaces the planned `@fhirforge/express`. FHIR REST routes to `store.as(ctx)`, Bundles at the base URL, `searchset` / `history` Bundles, `ETag` / `Last-Modified` / `Location`, `If-Match`, a public `/metadata` CapabilityStatement, 401 without a context, `Cache-Control: no-store`, a body limit and generic 500s. Added `store.searchParameters(type)` for it.
@@ -21,11 +22,10 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ## Next, in order
 
-Nothing queued: pick the next item from **Later** (proposed: expunge, which the audit table and history make the main gap for data-retention requests).
+Nothing queued: pick the next item from **Later**.
 
 ## Later
 
-- **Expunge:** remove every version, index row and derived copy of a resource in one transaction (CLAUDE.md §6).
 - **Blind indexes:** the `blind` search policy (HMAC with an app-supplied key, exact match only).
 - **Field-level encryption:** `encryptor` hook, envelope encryption, key ID per row (CLAUDE.md §5).
 - **First publish of `@fhirforge/http`:** a new package's first version goes out by hand before trusted publishing can be configured (README > Releasing). Do it before merging the next "Version packages" PR.
