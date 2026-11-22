@@ -7,7 +7,9 @@ export type IssueCode =
   | 'not-supported'
   | 'duplicate'
   | 'exception'
-  | 'forbidden';
+  | 'forbidden'
+  | 'login'
+  | 'too-costly';
 
 /** One OperationOutcome issue. `expression` holds element paths (e.g. `Patient.birthDate`), never values. */
 export interface OutcomeIssue {

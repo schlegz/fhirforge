@@ -34,10 +34,13 @@ fhirforge/
 │   │   ├── src/search.ts                      Search SQL builder and index row writes (bind parameters only).
 │   │   └── src/transport.ts                   TLS enforcement for pg Pools.
 │   ├── pglite/        @fhirforge/pglite       In-process PGlite storage (wraps @fhirforge/pg) for tests and local development.
+│   ├── next/          @fhirforge/next         FHIR REST route handler (fetch-style; Next.js App Router and others):
+│   │                                          routing, bodies (size limit), headers, searchset/history Bundles, /metadata.
 │   ├── fhirforge/     fhirforge (unscoped)    Re-exports core, pg and r4: one install for the common setup.
 │   └── store-tests/   (private)               Integration tests on PGlite and, if configured, real Postgres:
 │                                              store.test.ts (CRUD, history, validation on write), search.test.ts,
 │                                              bundle.test.ts (transaction / batch, rollback, races, deadlock),
+│                                              http.test.ts (REST handler over real Request objects),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -60,6 +63,7 @@ Dependency direction (never add an arrow the other way):
 definitions ← codegen            (build-time only; nothing at runtime depends on these)
 core ← r4 (type-only) ← fhirforge
 core ← pg ← pglite
+core ← next                      (HTTP; web-standard Request/Response only, no framework dependency)
 core, pg ← fhirforge
 store-tests → everything (private, never published)
 ```
@@ -166,6 +170,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | Errors never echo search values, invalid ids or invalid type names | In place (tested in `search.test.ts`) |
 | Search index rows written in the write transaction; removed by FK cascade with the resource | In place |
 | Search limits: `_count` ≤ 1000, ≤ 100 values per parameter, ≤ 50 clauses, `_offset` ≤ 100000 | In place |
+| REST handler (`@fhirforge/next`): caller context required (401), generic 500s, `Cache-Control: no-store`, body limit (413), JSON only | In place (tested in `http.test.ts`) |
 | Bundle transactions: all writes in one database transaction (`writeAll`, rows locked in a fixed order); every entry validated, authorized, pinned and audited; ≤ 100 entries, ≤ 10 searches | In place (tested in `bundle.test.ts`) |
 | `authorize` policy (required; `'allow-all'` is the explicit opt-out), `store.as(ctx)`, `store.asSystem(reason)` | In place |
 | Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
@@ -186,7 +191,8 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 - **Bundle errors** add the entry index (`entry[3]: …`) and never echo `request.url` or `fullUrl` (they can contain identifiers).
 - **Ids can be PHI.** Server-assigned ids are random UUIDs. Client-assigned ids (update-as-create) might be MRNs or other identifiers. Treat ids as sensitive in anything that leaves the process, and recommend in docs that apps don't use real-world identifiers as ids.
 - **No PHI in telemetry.** When tracing (e.g. OpenTelemetry) is added, spans may record resource type, operation, duration and status, never ids of client-assigned resources, content or parameters.
-- **No stack traces or internals in outcomes.** OperationOutcome `diagnostics` returned to clients (HTTP adapters, later) must not include stack traces, SQL or driver messages.
+- **No stack traces or internals in outcomes.** OperationOutcome `diagnostics` returned to clients must not include stack traces, SQL or driver messages. In `@fhirforge/next`, only `FhirError`s become their own outcome; everything else is a fixed "Internal server error" 500, and the error goes to the app's `onError`, never into the response or a log.
+- **HTTP adapters** (`@fhirforge/next`, later `express`): every data request needs a context from the app's `context` function (no default; 401 without it, before the store is touched). Responses carry `Cache-Control: no-store`. Bodies are read with a byte limit (`maxBodyBytes`) and never echoed in errors. Only `/metadata` is public; don't add other public routes.
 
 ### 2. SQL safety
 
@@ -237,7 +243,7 @@ How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these propert
 - `onAudit` gets one `StoreAuditEvent` per data operation (success, denied, not-found, error): `ctx`, system and reason, action, resource type, id, version, outcome, status, and for searches the parameter names and returned ids. Never add resource content, search values or error messages to events.
 - If `onAudit` throws, the operation fails and the result is withheld (writes have already committed), unless the app passes `onAuditError`. Don't swallow audit errors anywhere else.
 - `migrate()` and `reindex()` are maintenance operations on the store and are not audited. Don't expose resource data through them.
-- New data operations (`_include`, chained search, HTTP adapters) must go through the same scope, policy and audit path. An `_include`d or chained resource is a read of that resource and needs its own check.
+- New data operations (`_include`, chained search, new HTTP adapters) must go through the same scope, policy and audit path. An `_include`d or chained resource is a read of that resource and needs its own check.
 
 ### 8. Test data and fixtures
 

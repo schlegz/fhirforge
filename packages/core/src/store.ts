@@ -2,6 +2,7 @@ import type { AccessOptions, StoreAuditEvent, AuditOutcome, AuthorizeRequest, St
 import { FhirError } from './errors.js';
 import { extractIndexRows, type SearchPolicy } from './search/index-rows.js';
 import { parseSearch, type SearchParams } from './search/query.js';
+import type { SearchParamType } from './search/types.js';
 import {
   atEntry,
   errorResponse,
@@ -118,6 +119,12 @@ export interface FhirStore<M, Ctx = unknown> extends FhirDataOperations<M> {
    * migrations of data, background processing). Still audited, with the reason.
    */
   asSystem(reason: string): FhirDataOperations<M>;
+
+  /**
+   * The search parameters a resource type supports in this store: compiled ones,
+   * minus those with search policy `none`. For capability statements (`/metadata`).
+   */
+  searchParameters<RT extends keyof M & string>(resourceType: RT): readonly { code: string; type: SearchParamType }[];
 
   /** Creates or upgrades storage for the configured resource types. Safe to run on every startup. */
   migrate(): Promise<MigrationResult>;
@@ -729,6 +736,12 @@ export function createFhirStore<
     asSystem: (reason) => {
       if (typeof reason !== 'string' || reason.trim() === '') throw new Error('asSystem(reason): a reason is required');
       return operations({ kind: 'system', reason });
+    },
+    searchParameters(resourceType) {
+      checkType(resourceType);
+      return (table?.[resourceType] ?? [])
+        .filter((p) => policy(resourceType, p.code) !== 'none')
+        .map((p) => ({ code: p.code, type: p.type }));
     },
     async migrate() {
       const { applied, reindex: needsReindex } = await storage.migrate(resourceTypes);

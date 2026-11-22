@@ -1,0 +1,44 @@
+{
+  "name": "@fhirforge/next",
+  "version": "0.2.0",
+  "description": "FHIR REST API for fhirforge as a fetch-style route handler (Next.js App Router, and any framework with Request/Response).",
+  "license": "Apache-2.0",
+  "author": "Scott Schlegel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schlegz/fhirforge.git",
+    "directory": "packages/next"
+  },
+  "homepage": "https://github.com/schlegz/fhirforge#readme",
+  "bugs": {
+    "url": "https://github.com/schlegz/fhirforge/issues"
+  },
+  "keywords": [
+    "fhir",
+    "nextjs",
+    "rest",
+    "route-handler"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@fhirforge/core": "workspace:*"
+  }
+}
