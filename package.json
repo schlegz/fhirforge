@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -b packages/definitions packages/codegen packages/r4 packages/fhirforge",
     "test": "pnpm build && vitest run && pnpm test:types && pnpm test:examples",
-    "test:types": "tsc -p packages/r4/tsconfig.test.json",
+    "test:types": "tsc -p packages/r4/tsconfig.test.json && tsc -p tsconfig.json",
     "test:examples": "tsx packages/r4/scripts/check-examples.ts",
     "gen:r4": "tsc -b packages/codegen && node packages/codegen/dist/cli.js --package hl7.fhir.r4.core@4.0.1 --out packages/r4/src/generated",
     "changeset": "changeset",
