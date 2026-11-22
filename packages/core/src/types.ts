@@ -1,4 +1,5 @@
 import type { SearchParameterTable } from './search/types.js';
+import type { ValidationTable } from './validation/types.js';
 
 /**
  * The smallest resource shape core relies on. Every generated resource type
@@ -18,6 +19,8 @@ export interface FhirVersionPackage<TMap> {
   readonly fhirVersion: string;
   /** Compiled search parameters (generated). Without them, the store can't search. */
   readonly searchParameters?: SearchParameterTable;
+  /** Compiled validation rules (generated). Required: the store validates every resource it writes. */
+  readonly validation?: ValidationTable;
   readonly __resources?: TMap;
 }
 

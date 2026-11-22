@@ -44,7 +44,8 @@ async function main(): Promise<void> {
   process.stdout.write(
     `Generated ${count} files for FHIR ${defs.fhirVersion}: ${generated.resourceTypes.length} resources, ` +
       `${generated.complexTypes.length} datatypes, ${generated.primitiveTypes.length} primitives, ` +
-      `${generated.searchParameterCount} search parameters (${generated.unsupportedSearchParameterCount} not supported yet) ` +
+      `${generated.searchParameterCount} search parameters (${generated.unsupportedSearchParameterCount} not supported yet), ` +
+      `validation rules for ${generated.validationTypeCount} types ` +
       `in ${Date.now() - started} ms → ${values.out}\n`,
   );
 }

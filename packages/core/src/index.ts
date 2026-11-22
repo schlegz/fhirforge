@@ -9,7 +9,7 @@ export type {
   AuthorizeResult,
   StoreAction,
 } from './access.js';
-export { FhirError, isFhirError, type IssueCode, type OperationOutcomeLike } from './errors.js';
+export { FhirError, isFhirError, type IssueCode, type OperationOutcomeLike, type OutcomeIssue } from './errors.js';
 export { stampMeta, type FhirStorage, type Indexer, type StoredVersion, type UpdateResult, type WriteOptions } from './storage.js';
 export type { AnyResource, FhirVersionPackage, HistoryEntry, MigrationResult, ResourceMapOf, SearchResult, Stored } from './types.js';
 export type { CompiledSearchParameter, PathStep, SearchParameterTable, SearchParamType, StepFilter } from './search/types.js';
@@ -25,4 +25,7 @@ export {
   type SortKey,
   type Prefix,
 } from './search/query.js';
+export type { ElementRule, PrimitiveKind, ValidationTable } from './validation/types.js';
+export { createValidator, MAX_DEPTH, MAX_ISSUES, type ValidationIssue, type Validator } from './validation/validate.js';
+export { checkPrimitive, MAX_STRING_LENGTH } from './validation/primitives.js';
 export { normalizeString, dateRange, numberRange, parseReference } from './search/values.js';

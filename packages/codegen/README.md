@@ -1,6 +1,6 @@
 # @fhirforge/codegen
 
-Build-time generator for strict FHIR TypeScript types and compiled search parameters.
+Build-time generator for strict FHIR TypeScript types, compiled search parameters and validation rules.
 
 ```bash
 fhirforge-codegen --package hl7.fhir.r4.core@4.0.1 --out src/generated

@@ -2,7 +2,7 @@
 
 Embeddable FHIR storage for Node and TypeScript. Add it to any app to store, search and manage FHIR resources in your own Postgres database. It's a library, not a server: your app keeps control of the connection, transactions, auth and HTTP.
 
-> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with access control and audit hooks. Transactions (Bundles) and HTTP adapters are next.
+> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, access control and audit hooks. Transactions (Bundles) and HTTP adapters are next.
 
 ## Quick start
 
@@ -30,9 +30,27 @@ const page = await fhir.search('Patient', { family: 'doe', birthdate: 'ge1970', 
 page.resources; // Stored<Patient>[]; page.total counts all matches; page.next has the next page's params
 ```
 
-Errors are `FhirError`s with an HTTP `status` and a FHIR `outcome` (OperationOutcome): 400 invalid or unsupported, 404 not found, 410 deleted, 412 version conflict.
+Errors are `FhirError`s with an HTTP `status` and a FHIR `outcome` (OperationOutcome): 400 invalid (including failed validation, with one issue per problem) or unsupported, 404 not found, 410 deleted, 412 version conflict.
 
 Ids are server-assigned UUIDs. `update` also accepts a client-chosen id (update-as-create), but don't use real-world identifiers such as MRNs as ids: ids appear in references, URLs and error messages, so they shouldn't be PHI. Put identifiers in `identifier`.
+
+### Validation
+
+TypeScript types don't exist at runtime, so `create` and `update` validate every resource against the base FHIR spec before your access policy sees it. The rules are compiled from the StructureDefinitions at build time (`validation` in `@fhirforge/r4`); at runtime the store only walks that data.
+
+- **Checked:** unknown elements; cardinality (required elements, arrays vs single values, no empty arrays or objects); element types; at most one variant per choice element (`deceased[x]`), and one when it's required; required bindings on `code` elements (`gender: 'M'` fails); primitive formats (dates with real calendar days, `dateTime` / `instant` with a time zone, `id`, `uri`, `code`, `oid`, `uuid`, `base64Binary`, integer ranges, strings up to 1 MB); primitive extensions (`_birthDate`); contained resources, by their own type.
+- **Extensions are open:** any `url` is accepted, but each extension must be a well-formed Extension (a `url`, one `value[x]`).
+- **Not checked yet:** invariants (FHIRPath constraints), profiles, reference target types, non-required bindings, and required bindings on `Coding` / `CodeableConcept` or on value sets that can't be expanded offline (`unvalidatedBindings` in `@fhirforge/r4` lists them).
+
+Validation is always on; there is no opt-out. A rejected resource throws 400 with one OperationOutcome issue per problem (up to 100), each naming the element path, never the value:
+
+```ts
+await fhir.create(JSON.parse(body)); // e.g. { "resourceType": "Patient", "birthDate": "1974-02-30" }
+// FhirError 400: outcome.issue = [{ severity: 'error', code: 'invalid',
+//   diagnostics: 'Patient.birthDate is not a valid date (YYYY, YYYY-MM or YYYY-MM-DD)', expression: ['Patient.birthDate'] }]
+```
+
+Resources already in the database aren't re-validated on read.
 
 ### Access control and audit
 
@@ -113,8 +131,8 @@ The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on these tables,
 | Package | What it is |
 | --- | --- |
 | `@fhirforge/definitions` | Build-time. Loads official FHIR packages (e.g. `hl7.fhir.r4.core@4.0.1`) from packages.fhir.org into the standard `~/.fhir/packages` cache, indexes StructureDefinitions, ValueSets, CodeSystems and SearchParameters, and builds element trees. |
-| `@fhirforge/codegen` | Build-time. Generates strict TypeScript types for a FHIR version and compiles its search parameters' FHIRPath expressions into plain path data (`fhirforge-codegen` CLI). |
-| `@fhirforge/r4` | Generated FHIR R4 types (146 resources, 41 datatypes, 20 primitives, `ResourceTypeMap`) and compiled search parameters. Use `import type` in frontend code so the search data isn't bundled. |
+| `@fhirforge/codegen` | Build-time. Generates strict TypeScript types for a FHIR version, compiles its search parameters' FHIRPath expressions into plain path data, and compiles its StructureDefinitions into validation rules (`fhirforge-codegen` CLI). |
+| `@fhirforge/r4` | Generated FHIR R4 types (146 resources, 41 datatypes, 20 primitives, `ResourceTypeMap`), compiled search parameters and validation rules. Use `import type` in frontend code so the search and validation data isn't bundled. |
 | `@fhirforge/core` | `createFhirStore`: version-neutral, typed from the version package you pass in, with `authorize` / `onAudit` hooks. No I/O of its own. |
 | `@fhirforge/pg` | Postgres storage: takes a `pg` Pool (or any `Database`), with migrations, optimistic locking, search indexes and TLS enforcement. |
 | `@fhirforge/pglite` | In-process [PGlite](https://pglite.dev) storage: real Postgres with no server, for tests and local development. |
@@ -141,6 +159,8 @@ const p: Patient = {
 - **References are generic.** `Reference<Patient | Group>` checks `reference` (`Patient/123`, absolute URLs, `#contained`, `urn:uuid:`) and `type`.
 - **Primitive extensions** (`_birthDate`) and backbone element types (`PatientContact`) are included; `contentReference` elements reuse the referenced type.
 
+The store checks the same bindings, choice rules and cardinality at runtime (see [Validation](#validation)), so untyped JSON gets the same guarantees. Reference targets are checked only by the types for now.
+
 ## Security
 
 fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SOC 2 compliant on its own. What it does today:
@@ -150,6 +170,7 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Writes are atomic and race-free: each update or delete locks the row and writes the current version, its history and its search index rows in one transaction.
 - `postgresStorage(pool)` refuses a non-TLS connection to a non-local host (`ssl`, or `sslmode=require` / `verify-ca` / `verify-full`). `{ allowInsecure: true }` overrides it for development only. A custom `Database` is your responsibility.
 - Errors (`FhirError`) name the resource type, id, version or search parameter, never field or search values. The library doesn't log resource content.
+- Every resource is validated against the base spec before it reaches the access policy or the database. Validation issues carry element paths only, element names from the input appear only if they look like FHIR names, and nesting depth and issue count are bounded so hostile JSON can't make it do unbounded work. Primitive formats use fixed, linear-time patterns, not regexes from the definitions.
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
 
@@ -161,7 +182,7 @@ Requires Node 20+ and pnpm.
 
 ```bash
 pnpm install
-pnpm test          # build, unit + store tests (PGlite), type tests, example type-check
+pnpm test          # build, unit + store tests (PGlite), type tests, example type-check and validation
 pnpm gen:r4        # regenerate packages/r4/src/generated from hl7.fhir.r4.core@4.0.1
 ```
 
@@ -182,11 +203,14 @@ FHIRFORGE_R4_SOURCE=/path/to/definitions pnpm test
 node packages/codegen/dist/cli.js --source /path/to/definitions --out packages/r4/src/generated
 ```
 
-To type-check the full set of official examples, extract `hl7.fhir.r4.examples` and run:
+To check the full set of official examples, extract `hl7.fhir.r4.examples` and run:
 
 ```bash
-pnpm test:examples ~/.fhir/packages/hl7.fhir.r4.examples#4.0.1/package
+pnpm test:examples ~/.fhir/packages/hl7.fhir.r4.examples#4.0.1/package            # type-check and runtime validation
+pnpm test:examples --no-types ~/.fhir/packages/hl7.fhir.r4.examples#4.0.1/package # runtime validation only (seconds)
 ```
+
+All 5,293 valid examples pass runtime validation; 16 examples that break the base spec (missing required elements, malformed codes or ids) are listed in `check-examples.ts` and must be rejected. The type-check is stricter than the base spec (reference targets, a primitive's value required next to its `_extension`), and 32 official examples fail it.
 
 Releases use [Changesets](https://github.com/changesets/changesets); all `@fhirforge/*` packages are versioned together.
 

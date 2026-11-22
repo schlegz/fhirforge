@@ -54,6 +54,23 @@ describe('generateTypes (R4)', () => {
     expect(generated.searchParameterCount).toBeGreaterThan(2000);
   });
 
+  it('compiles validation rules into data', () => {
+    const v = file('validation.ts');
+    expect(v).toContain('"birthDate":{"t":"date","max":1}');
+    expect(v).toContain('"gender":{"t":"code","max":1,"vs":"http://hl7.org/fhir/ValueSet/administrative-gender"}');
+    expect(v).toContain('"deceasedBoolean":{"t":"boolean","max":1,"choice":"deceased[x]"}');
+    expect(v).toContain('"status":{"t":"code","min":1,"max":1,"vs":"http://hl7.org/fhir/ValueSet/observation-status"}');
+    expect(v).toContain('"contained":{"t":"Resource"}');
+    expect(v).toContain('"Patient.contact": {');
+    // Content references point at the backbone element they reuse.
+    expect(v).toMatch(/"Questionnaire\.item": \{[^\n]*"item":\{"t":"Questionnaire\.item"\}/);
+    // Resource.id is an `id`, Element.id a string.
+    expect(v).toContain('"Patient": {"id":{"t":"id","max":1}');
+    expect(v).toContain('"Element": {"id":{"t":"string","max":1}');
+    expect(v).toContain('"Money.currency: value set http://hl7.org/fhir/ValueSet/currencies can\'t be expanded locally"');
+    expect(generated.validationTypeCount).toBeGreaterThan(600);
+  });
+
   it('matches the committed output in packages/r4 (run `pnpm gen:r4` if this fails)', async () => {
     for (const [path, contents] of generated.files) {
       const committed = await readFile(join(committedDir, path), 'utf8').catch(() => '(missing)');
