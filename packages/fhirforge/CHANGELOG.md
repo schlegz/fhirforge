@@ -1,5 +1,14 @@
 # fhirforge
 
+## 0.5.0
+
+### Patch Changes
+
+- Updated dependencies [fcc6565]
+  - @fhirforge/core@0.5.0
+  - @fhirforge/pg@0.5.0
+  - @fhirforge/r4@0.5.0
+
 ## 0.4.0
 
 ### Patch Changes
