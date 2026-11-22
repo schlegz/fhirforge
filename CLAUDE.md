@@ -42,6 +42,7 @@ fhirforge/
 ├── .github/workflows/ci.yml                   CI: Postgres 18 service, FHIR package cache, `pnpm test`.
 ├── .github/workflows/release.yml              Release: "Version packages" PR, then npm publish via trusted publishing.
 ├── docs/roadmap.md                            What's done, what's next (in order), open decisions. Start here for new work.
+├── docs/design/                               Design docs for upcoming work (drafts until reviewed), e.g. bundles.md.
 ├── scripts/publish.mjs                        Packs (pnpm) and publishes (npm) unpublished versions, with safety checks;
 │                                              safe to re-run (publish-errors.mjs recognizes duplicate-version refusals).
 ├── tsconfig.base.json                         Shared compiler options (strict, NodeNext, verbatimModuleSyntax, composite).
