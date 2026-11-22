@@ -80,6 +80,15 @@ export interface FhirDataOperations<M> {
    */
   delete<RT extends keyof M & string>(resourceType: RT, id: string, options?: { ifMatch?: string }): Promise<void>;
 
+  /**
+   * Permanently removes a resource: every version and every search index row, in one
+   * transaction. Works on deleted resources too. Audit rows are kept (they hold ids, not
+   * content). It's a separate, explicit operation: `delete` never expunges. The policy
+   * decides with action `expunge` on the latest content; denied or missing is 404. Pass
+   * `ifMatch` to fail with 412 unless the current version is the one you checked.
+   */
+  expunge<RT extends keyof M & string>(resourceType: RT, id: string, options?: { ifMatch?: string }): Promise<void>;
+
   /** Every version of a resource, newest first. Throws 404 if it never existed or isn't visible. */
   history<RT extends keyof M & string>(resourceType: RT, id: string): Promise<HistoryEntry<M[RT]>[]>;
 
@@ -509,6 +518,26 @@ export function createFhirStore<
         if (!plan) return { result: undefined }; // nothing to delete: audited on its own
         const version = await storage.delete(resourceType, id, { ifMatch: (plan as { ifMatch: string }).ifMatch, ...withRows({}) });
         return { result: undefined, ...(version ? { versionId: version.versionId } : {}), persisted: auditTable };
+      });
+    },
+
+    async expunge(resourceType, id, expungeOptions) {
+      checkType(resourceType);
+      checkId(id);
+      return audited(scope, { action: 'expunge', resourceType, id }, async (withRows) => {
+        const versions = await storage.history(resourceType, id);
+        if (versions.length === 0) throw FhirError.notFound(resourceType, id);
+        // The policy decides on the latest content (a deleted resource by its last version), like history.
+        const latest = versions.find((v) => v.resource)?.resource ?? undefined;
+        if (!(await can(scope, { action: 'expunge', resourceType, id, ...(latest ? { resource: latest } : {}) }))) {
+          throw hidden(resourceType, id);
+        }
+        // Pinned: if the resource changed after the policy saw it, 412.
+        const current = versions[0]!.versionId;
+        const requested = normalizeVersion(expungeOptions?.ifMatch);
+        const removed = await storage.expunge(resourceType, id, { ifMatch: requested ?? current, ...withRows({}) });
+        if (!removed) throw FhirError.notFound(resourceType, id); // expunged concurrently
+        return { result: undefined, versionId: requested ?? current, persisted: auditTable };
       });
     },
 

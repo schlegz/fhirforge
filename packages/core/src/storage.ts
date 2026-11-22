@@ -89,6 +89,19 @@ export interface FhirStorage {
     options?: { ifMatch?: string } & Pick<WriteOptions, 'audit'>,
   ): Promise<StoredVersion | undefined>;
 
+  /**
+   * Permanently removes a resource: its current row, every history version and,
+   * through the foreign keys, every search index row, in one transaction with
+   * the row locked. Audit rows are kept. With `ifMatch`, throws
+   * FhirError.versionConflict unless the current version equals it (also a
+   * delete marker's version). Returns undefined if the resource doesn't exist.
+   */
+  expunge(
+    resourceType: string,
+    id: string,
+    options?: { ifMatch?: string } & Pick<WriteOptions, 'audit'>,
+  ): Promise<{ versions: number } | undefined>;
+
   /** The current version, including a deleted one (with `deleted: true`). */
   read(resourceType: string, id: string): Promise<StoredVersion | undefined>;
 

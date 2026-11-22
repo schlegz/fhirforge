@@ -265,6 +265,27 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       );
     },
 
+    expunge(resourceType, id, opts = {}) {
+      const t = tablesFor(schema, resourceType);
+      return run(resourceType, () =>
+        database.transaction(async (tx) => {
+          const current = await lockCurrent(tx, resourceType, id);
+          if (opts.ifMatch !== undefined && opts.ifMatch !== current?.v) {
+            throw FhirError.versionConflict(resourceType, id, opts.ifMatch, current?.v);
+          }
+          if (!current) return undefined;
+          const { rows } = await tx.query<{ n: number }>(
+            `WITH removed AS (DELETE FROM ${t.history} WHERE id = $1 RETURNING 1) SELECT count(*)::int AS n FROM removed`,
+            [id],
+          );
+          // Index rows go with the current row (ON DELETE CASCADE).
+          await tx.query(`DELETE FROM ${t.current} WHERE id = $1`, [id]);
+          await insertAudit(tx, withVersion(opts.audit, { versionId: current.v } as StoredVersion));
+          return { versions: rows[0]!.n };
+        }),
+      );
+    },
+
     recordAudit(rows) {
       return run('_audit', () => insertAudit(database, rows));
     },

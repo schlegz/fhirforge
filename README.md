@@ -130,6 +130,20 @@ result.entry[0].response; // { status: '201 Created', location: 'Patient/…/_hi
 
 `delete` also takes `{ ifMatch }`, like `update`.
 
+### Expunge
+
+`delete` keeps every version (FHIR history). To remove a resource for good, for example for a data-deletion request, call `expunge`:
+
+```ts
+await fhir.asSystem('erasure request #1234').expunge('Patient', id);
+```
+
+- It removes the current version, every history version and every search index row in one transaction. Afterwards, `read`, `vread` and `history` return 404 and the id can be reused. It works on deleted resources too.
+- It's its own operation: `delete` never expunges. Your policy decides on it (action `expunge`, with the latest content); denied looks like missing (404). It's pinned like other writes: if the resource changes after the policy check, or `ifMatch` doesn't match, it fails with 412 and removes nothing.
+- It's audited (action `expunge`). Audit events and audit-table rows about the resource are **kept**: they hold ids, not content, and audit retention usually outlives the data.
+- It isn't exposed by the REST handler: call it from trusted server code.
+- The runtime database role needs `DELETE` on the resource and history tables to expunge (see [Storage layout](#storage-layout)). Without that grant, expunge fails and nothing else is affected.
+
 ### REST API
 
 `@fhirforge/http` serves the store over FHIR REST. `createFhirHandler` returns a fetch-style handler for frameworks built on web-standard Request/Response; `toNodeHandler` adapts it for Express and `node:http`. In a Next.js App Router app, in `app/fhir/[[...path]]/route.ts`:
@@ -211,6 +225,8 @@ GRANT SELECT, INSERT, UPDATE ON fhir."Patient", fhir."Patient_history" TO app_ru
 GRANT SELECT, INSERT, UPDATE, DELETE ON fhir."Patient_string", fhir."Patient_token", fhir."Patient_date",
   fhir."Patient_reference", fhir."Patient_number", fhir."Patient_quantity", fhir."Patient_uri" TO app_runtime;
 GRANT INSERT ON fhir."_audit" TO app_runtime;
+-- Only if the app uses expunge:
+GRANT DELETE ON fhir."Patient", fhir."Patient_history" TO app_runtime;
 ```
 
 The audit table grows without bound. To manage retention by dropping old partitions instead of deleting rows, create `fhir."_audit"` yourself as a table partitioned by `recorded` (same columns) before the first `migrate()`: the migration only creates it if it doesn't exist. When a migration adds index tables, `migrate()` indexes existing resources automatically.
@@ -266,9 +282,10 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 - The REST handler (`@fhirforge/http`, both the fetch-style and the Node adapter) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
+- `expunge` removes a resource's every version and index row in one transaction (history and index rows are copies of PHI), as its own policy-checked, audited operation; audit rows are kept.
 - The optional audit table records every operation append-only, and writes a change and its audit row in one database transaction, so a committed change always has its record.
 
-What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: field-level encryption, blind (keyed-hash) search indexes and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
+What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: field-level encryption and blind (keyed-hash) search indexes. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
 
 ## Development
 
