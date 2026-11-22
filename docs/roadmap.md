@@ -57,7 +57,7 @@ Learned from the 0.2.0 release (run 45072636883, four attempts):
 
 - **Trusted publisher not configured → 404** on the first `npm publish` ("could not be found or you do not have permission"), even though the log says "using npm trusted publishing". Every package needs its own trusted publisher entry.
 - **Trusted publisher that doesn't allow direct publish → 403** "OIDC permission denied for this action". `scripts/publish.mjs` runs a plain `npm publish`, so each entry must allow publishing, not only staged publishing. Configure all seven packages before re-running: the script stops at the first failure, which leaves a partly published version.
-- **New versions take minutes to show up.** npm accepted a version (`+ @fhirforge/r4@0.2.0`) that the registry didn't serve for several minutes. The script's "already on npm" check uses `npm view`, so re-running the job inside that window would try to publish the same version again and fail. After a partial release, wait until every accepted version is visible (`npm view <pkg>@<version> version`), then re-run the failed job (`gh run rerun <run-id> --failed`); it skips what's already published.
+- **New versions take minutes to show up.** npm accepted a version (`+ @fhirforge/r4@0.2.0`) that the registry didn't serve for several minutes. The script's "already on npm" check uses `npm view`, which misses them, so a re-run inside that window publishes the same version again. `scripts/publish.mjs` now treats npm's duplicate-version refusal (`publish-errors.mjs`) as already published, so re-running the failed job (`gh run rerun <run-id> --failed`) right away is safe.
 - Still unverified: `changesets/action@v1` in `release.yml` was not checked against the action's current major version.
 
 ## Open decisions

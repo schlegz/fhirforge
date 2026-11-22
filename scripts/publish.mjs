@@ -13,11 +13,15 @@
  * - the tarball holds only package.json, README.md, LICENSE and dist/
  * - no `workspace:` version is left in the packed package.json
  * - the git working tree is clean (skipped with --dry-run)
+ *
+ * Safe to re-run after a partial failure: published versions are skipped, also
+ * when npm doesn't serve them yet and refuses the publish as a duplicate.
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { alreadyPublished } from './publish-errors.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -97,7 +101,20 @@ for (const dir of ORDER) {
   if (dryRun) publishArgs.push('--dry-run');
   // In GitHub Actions, npm uses trusted publishing (OIDC) and adds provenance automatically.
   console.log(`${dryRun ? 'would publish' : 'publish'} ${id} (${files.filter((f) => !f.endsWith('/')).length} files)${inCi ? ' via trusted publishing' : ''}`);
-  run('npm', publishArgs, { stdio: ['inherit', 'inherit', 'inherit'] });
+  // Show npm's output as it runs, and keep stderr to recognize a duplicate-version refusal.
+  const result = spawnSync('npm', publishArgs, { encoding: 'utf8', stdio: ['inherit', 'inherit', 'pipe'] });
+  if (result.stderr) process.stderr.write(result.stderr);
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    if (!dryRun && alreadyPublished(result.stderr ?? '')) {
+      // Published by an earlier attempt, but not visible to `npm view` yet. Its tag was pushed
+      // then (or will be by `git push --tags`), so don't tag or count it again.
+      console.log(`skip ${id} (already published; npm doesn't serve it yet)`);
+      continue;
+    }
+    console.error(`${id}: npm publish failed (exit code ${result.status})`);
+    process.exit(1);
+  }
 
   if (!dryRun) {
     run('git', ['tag', id], { cwd: root });

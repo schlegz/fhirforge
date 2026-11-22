@@ -245,7 +245,7 @@ npm deprecate fhirforge@1.0.0 "Name placeholder. Use the latest 0.x release."
 
 Then, for each of the seven packages on npmjs.com: Settings → Trusted publishing → GitHub Actions, repository `schlegz/fhirforge`, workflow `release.yml`, with publishing allowed (not only staged publishing: the release runs a plain `npm publish`). From then on, releases go through the pull request.
 
-If a release fails partway (e.g. one package's trusted publisher is missing), fix the npm settings for every package, wait until the versions that did publish are visible on npm (that can take a few minutes), then re-run the failed job with `gh run rerun <run-id> --failed`. Already-published versions are skipped. [docs/roadmap.md](docs/roadmap.md) has the details from the 0.2.0 release.
+If a release fails partway (e.g. one package's trusted publisher is missing), fix the npm settings for every package, then re-run the failed job with `gh run rerun <run-id> --failed`. Already-published versions are skipped, including ones npm accepted but doesn't serve yet (that can take a few minutes): `scripts/publish.mjs` treats npm's "cannot publish over the previously published version" refusal as already published. [docs/roadmap.md](docs/roadmap.md) has the details from the 0.2.0 release.
 
 ## License
 
