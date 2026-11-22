@@ -37,6 +37,7 @@ fhirforge/
 ├── .changeset/                                Changesets config; all @fhirforge/* packages are versioned together.
 ├── .github/workflows/ci.yml                   CI: Postgres 18 service, FHIR package cache, `pnpm test`.
 ├── .github/workflows/release.yml              Release: "Version packages" PR, then npm publish via trusted publishing.
+├── docs/roadmap.md                            What's done, what's next (in order), open decisions. Start here for new work.
 ├── scripts/publish.mjs                        Packs (pnpm) and publishes (npm) unpublished versions, with safety checks.
 ├── tsconfig.base.json                         Shared compiler options (strict, NodeNext, verbatimModuleSyntax, composite).
 ├── tsconfig.json                              Type-checks tests and scripts that aren't part of a package build.
@@ -130,6 +131,8 @@ Update README.md in the same change when you:
 Before finishing, reread the README sections touched by your change and check every code sample against the current API. Don't document features that don't exist yet as if they do; mark them as planned.
 
 Also keep this file current: if you add a package, script, convention or security control, update the repository map, commands or rules here.
+
+Keep `docs/roadmap.md` current too: when you finish a roadmap item, move it to **Done**; when you find new work or make a decision listed under **Open decisions**, record it there.
 
 ## Security and HIPAA requirements
 

@@ -190,6 +190,10 @@ pnpm test:examples ~/.fhir/packages/hl7.fhir.r4.examples#4.0.1/package
 
 Releases use [Changesets](https://github.com/changesets/changesets); all `@fhirforge/*` packages are versioned together.
 
+## Roadmap
+
+[docs/roadmap.md](docs/roadmap.md) lists what's done, what's next and the open design decisions.
+
 ## Releasing
 
 All published packages (`@fhirforge/*` and `fhirforge`) share one version and are released together with [Changesets](https://github.com/changesets/changesets). Releases are 0.x while the API settles.
