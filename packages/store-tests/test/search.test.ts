@@ -253,7 +253,7 @@ describe.each(backends)('search on $name', (backend) => {
     it('indexes existing data with reindex()', async () => {
       // A store whose version package has no search parameters writes without indexing.
       const storage = await backend.storage();
-      const noSearch: FhirVersionPackage<ResourceTypeMap> = { fhirVersion: '4.0.1' };
+      const noSearch: FhirVersionPackage<ResourceTypeMap> = { fhirVersion: '4.0.1', validation: r4.validation };
       const plain = createFhirStore({ authorize: 'allow-all', storage, fhir: noSearch, resources: ['Patient'] });
       await plain.migrate();
       await plain.create({ resourceType: 'Patient', name: [{ family: 'Unindexed' }] });

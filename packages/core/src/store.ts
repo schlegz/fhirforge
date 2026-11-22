@@ -3,6 +3,7 @@ import { FhirError } from './errors.js';
 import { extractIndexRows, type SearchPolicy } from './search/index-rows.js';
 import { parseSearch, type SearchParams } from './search/query.js';
 import type { FhirStorage, Indexer, StoredVersion } from './storage.js';
+import { createValidator } from './validation/validate.js';
 import type {
   AnyResource,
   FhirVersionPackage,
@@ -139,6 +140,18 @@ export function createFhirStore<
   const resourceTypes = [...new Set(options.resources)];
   if (resourceTypes.length === 0) throw new Error('createFhirStore: `resources` must list at least one resource type');
   const allowed = new Set<string>(resourceTypes);
+  if (!fhir.validation) {
+    throw new Error(`createFhirStore: the FHIR ${fhir.fhirVersion} package has no validation rules; the store validates every write`);
+  }
+  for (const t of resourceTypes) {
+    if (!fhir.validation.resources.includes(t)) throw new Error(`createFhirStore: ${String(t)} is not a resource type in FHIR ${fhir.fhirVersion}`);
+  }
+  const validator = createValidator(fhir.validation);
+  /** Rejects a resource that doesn't conform to the base spec (400, one issue per problem, paths only). */
+  const validate = (resourceType: string, resource: unknown) => {
+    const issues = validator(resource);
+    if (issues.length) throw FhirError.validation(resourceType, issues);
+  };
 
   const checkType = (resourceType: unknown): string => {
     if (typeof resourceType !== 'string' || !allowed.has(resourceType)) {
@@ -262,6 +275,7 @@ export function createFhirStore<
       const resourceType = checkType(resource?.resourceType);
       return audited(scope, { action: 'create', resourceType }, async () => {
         const { id: _ignored, ...rest } = resource;
+        validate(resourceType, rest);
         if (!(await can(scope, { action: 'create', resourceType, resource: rest as AnyResource }))) {
           throw forbidden('create', resourceType);
         }
@@ -298,6 +312,7 @@ export function createFhirStore<
       const resourceType = checkType(resource?.resourceType);
       const id = checkId(resource.id);
       return audited(scope, { action: 'update', resourceType, id }, async () => {
+        validate(resourceType, resource);
         const requested = normalizeVersion(updateOptions?.ifMatch);
         // The policy sees both the stored version (may this caller change it?) and the new content.
         const existing = await storage.read(resourceType, id);

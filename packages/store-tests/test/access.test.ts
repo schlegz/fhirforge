@@ -164,6 +164,23 @@ describe.each(backends)('authorize and onAudit on $name', (backend) => {
       expect((await clinician().read('Patient', 'race-target')).name?.[0]?.family).toBe('First');
     });
 
+    it('validates before the policy sees the resource, and audits the rejection', async () => {
+      const seen: AuthorizeRequest<Session>[] = [];
+      authorize = (req) => {
+        seen.push(req);
+        return true;
+      };
+      const invalid = { resourceType: 'Patient', id: jane, gender: 'Synthetic-x' } as unknown as { resourceType: 'Patient'; id: string };
+      expect((await fhirError(() => clinician().create(invalid))).status).toBe(400);
+      expect((await fhirError(() => clinician().update(invalid))).status).toBe(400);
+      expect(seen).toEqual([]);
+      expect(events.map((e) => [e.action, e.outcome, e.status])).toEqual([
+        ['create', 'error', 400],
+        ['update', 'error', 400],
+      ]);
+      expect(JSON.stringify(events)).not.toContain('Synthetic');
+    });
+
     it('hides a denied delete as 404 and keeps the resource', async () => {
       expect((await fhirError(() => asJane().delete('Patient', john))).status).toBe(404);
       expect((await clinician().read('Patient', john)).id).toBe(john);

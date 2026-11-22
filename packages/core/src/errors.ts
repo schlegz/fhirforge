@@ -9,10 +9,18 @@ export type IssueCode =
   | 'exception'
   | 'forbidden';
 
+/** One OperationOutcome issue. `expression` holds element paths (e.g. `Patient.birthDate`), never values. */
+export interface OutcomeIssue {
+  severity: 'fatal' | 'error' | 'warning' | 'information';
+  code: IssueCode;
+  diagnostics?: string;
+  expression?: string[];
+}
+
 /** A minimal OperationOutcome, shaped like the FHIR resource so HTTP adapters can return it as-is. */
 export interface OperationOutcomeLike {
   resourceType: 'OperationOutcome';
-  issue: Array<{ severity: 'fatal' | 'error' | 'warning' | 'information'; code: IssueCode; diagnostics?: string }>;
+  issue: OutcomeIssue[];
 }
 
 /**
@@ -27,6 +35,8 @@ export class FhirError extends Error {
     readonly status: number,
     readonly code: IssueCode,
     message: string,
+    /** Individual issues (e.g. one per validation problem). Without them, the outcome has one issue with the message. */
+    readonly issues?: readonly OutcomeIssue[],
   ) {
     super(message);
   }
@@ -34,12 +44,29 @@ export class FhirError extends Error {
   get outcome(): OperationOutcomeLike {
     return {
       resourceType: 'OperationOutcome',
-      issue: [{ severity: 'error', code: this.code, diagnostics: this.message }],
+      issue: this.issues?.length
+        ? this.issues.map((i) => ({ ...i, ...(i.expression ? { expression: [...i.expression] } : {}) }))
+        : [{ severity: 'error', code: this.code, diagnostics: this.message }],
     };
   }
 
   static invalid(message: string): FhirError {
     return new FhirError(400, 'invalid', message);
+  }
+
+  /**
+   * A resource failed validation: 400 with one issue per problem. Issues carry the
+   * element path and a fixed reason, never a value from the resource.
+   */
+  static validation(resourceType: string, issues: ReadonlyArray<{ path: string; message: string }>): FhirError {
+    const first = issues[0];
+    const more = issues.length > 1 ? ` (and ${issues.length - 1} more)` : '';
+    return new FhirError(
+      400,
+      'invalid',
+      `Invalid ${resourceType}: ${first ? `${first.path} ${first.message}` : 'validation failed'}${more}`,
+      issues.map((i) => ({ severity: 'error', code: 'invalid', diagnostics: `${i.path} ${i.message}`, expression: [i.path] })),
+    );
   }
 
   static notSupported(message: string): FhirError {

@@ -168,6 +168,60 @@ describe.each(backends)('createFhirStore on $name', (backend) => {
     expect((await fhir.read('Observation', o.id)).valueQuantity?.value).toBe(72);
     expect((await fhirError(() => fhir.read('Patient', o.id))).status).toBe(404);
   });
+
+  describe('validation', () => {
+    // Untyped input, as it would arrive from JSON (TypeScript would reject these at compile time).
+    const untyped = <T>(resource: unknown) => resource as T;
+
+    it('rejects an invalid create with 400, an issue per problem (paths only), and writes nothing', async () => {
+      const before = (await fhir.search('Patient', {})).total;
+      const err = await fhirError(() =>
+        fhir.create(untyped({ resourceType: 'Patient', birthDate: 'Synthetic-1974', gender: 'Synthetic-x', nickname: 'Jo' })),
+      );
+      expect(err.status).toBe(400);
+      expect(err.code).toBe('invalid');
+      expect(err.message).toBe('Invalid Patient: Patient.birthDate is not a valid date (YYYY, YYYY-MM or YYYY-MM-DD) (and 2 more)');
+      expect(err.outcome.issue.map((i) => i.expression)).toEqual([['Patient.birthDate'], ['Patient.gender'], ['Patient.nickname']]);
+      expect(err.outcome.issue.every((i) => i.severity === 'error' && i.code === 'invalid')).toBe(true);
+      expect(JSON.stringify(err.outcome) + err.message).not.toMatch(/Synthetic|Jo"/);
+      expect((await fhir.search('Patient', {})).total).toBe(before);
+    });
+
+    it('ignores the id on create (it is replaced), but validates everything else', async () => {
+      const created = await fhir.create(untyped({ resourceType: 'Patient', id: 'not a valid id!' }));
+      expect(created.id).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    it('rejects an invalid update and keeps the stored version', async () => {
+      const p = await fhir.create({ resourceType: 'Patient', name: [{ family: 'Doe' }] });
+      const err = await fhirError(() => fhir.update(untyped({ ...p, name: { family: 'Doe' } })));
+      expect(err.status).toBe(400);
+      expect(err.outcome.issue[0]!.expression).toEqual(['Patient.name']);
+      const read = await fhir.read('Patient', p.id);
+      expect(read.meta.versionId).toBe('1');
+      // Update-as-create is validated too.
+      const created = await fhirError(() => fhir.update(untyped({ resourceType: 'Observation', id: 'obs-new', status: 'final' })));
+      expect(created.outcome.issue[0]!.expression).toEqual(['Observation.code']);
+      expect((await fhirError(() => fhir.read('Observation', 'obs-new'))).status).toBe(404);
+    });
+
+    it('rejects a hostile value as invalid rather than passing it on', async () => {
+      const err = await fhirError(() => fhir.create(untyped({ resourceType: 'Patient', birthDate: "1974'); DROP TABLE x; --" })));
+      expect(err.status).toBe(400);
+      expect(err.message).not.toContain('DROP');
+    });
+
+    it('requires validation rules in the version package', () => {
+      expect(() =>
+        createFhirStore({
+          authorize: 'allow-all',
+          storage: {} as FhirStorage,
+          fhir: { fhirVersion: r4.fhirVersion, searchParameters: r4.searchParameters },
+          resources: ['Patient'] as never[],
+        }),
+      ).toThrow(/no validation rules/);
+    });
+  });
 });
 
 describe('postgres storage details', () => {

@@ -1,6 +1,6 @@
 # @fhirforge/core
 
-The fhirforge store: typed create, read, update, delete, history and FHIR search, with required access control (`authorize`) and audit (`onAudit`) hooks. Version-neutral and storage-neutral: pass a version package (`@fhirforge/r4`) and a storage adapter (`@fhirforge/pg`, `@fhirforge/pglite`).
+The fhirforge store: typed create, read, update, delete, history and FHIR search, with runtime validation of every write, required access control (`authorize`) and audit (`onAudit`) hooks. Version-neutral and storage-neutral: pass a version package (`@fhirforge/r4`) and a storage adapter (`@fhirforge/pg`, `@fhirforge/pglite`).
 
 ```ts
 import { createFhirStore } from '@fhirforge/core';

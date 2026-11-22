@@ -7,6 +7,7 @@ import {
 } from '@fhirforge/definitions';
 import { TsModule } from './module.js';
 import { compileSearchParameters, renderSearchModule } from './search.js';
+import { compileValidation, renderValidationModule } from './validation.js';
 import {
   capitalize,
   jsDoc,
@@ -29,6 +30,8 @@ export interface GeneratedFiles {
   /** Compiled (resource, search parameter) pairs, and how many could not be compiled. */
   searchParameterCount: number;
   unsupportedSearchParameterCount: number;
+  /** Types with compiled validation rules (complex types, resources, backbone elements). */
+  validationTypeCount: number;
   complexTypes: string[];
   primitiveTypes: string[];
 }
@@ -139,6 +142,10 @@ export function generateTypes(defs: DefinitionSet, options: GenerateOptions = {}
   const search = compileSearchParameters(defs);
   files.set('search-parameters.ts', renderSearchModule(search, header));
 
+  // ---- validation rules (runtime data, not types) ----
+  const validation = compileValidation(defs);
+  files.set('validation.ts', renderValidationModule(validation, header));
+
   // ---- index ----
   const index = new TsModule('index');
   for (const m of [M.primitives, M.helpers, M.datatypes, M.resourceMap, ...resources.map((sd) => M.resource(sd.type))]) {
@@ -150,6 +157,7 @@ export function generateTypes(defs: DefinitionSet, options: GenerateOptions = {}
     files,
     searchParameterCount: Object.values(search.table).reduce((n, params) => n + params.length, 0),
     unsupportedSearchParameterCount: Object.values(search.unsupported).reduce((n, list) => n + list.length, 0),
+    validationTypeCount: Object.keys(validation.table.types).length,
     resourceTypes: resources.map((sd) => sd.type),
     complexTypes: complex.map((sd) => sd.type),
     primitiveTypes: primitives.map((sd) => sd.type),

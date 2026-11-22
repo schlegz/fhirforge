@@ -15,15 +15,18 @@ fhirforge/
 │   │                                          indexes StructureDefinitions, ValueSets, CodeSystems, SearchParameters; element trees.
 │   ├── codegen/       @fhirforge/codegen      Build-time. Generates TypeScript types for a FHIR version. CLI: fhirforge-codegen.
 │   │   ├── src/fhirpath.ts                    Parser for the FHIRPath subset used by search expressions (rejects the rest).
-│   │   └── src/search.ts                      Compiles SearchParameters into path steps → generated search-parameters.ts.
+│   │   ├── src/search.ts                      Compiles SearchParameters into path steps → generated search-parameters.ts.
+│   │   └── src/validation.ts                  Compiles StructureDefinitions into element rules → generated validation.ts.
 │   ├── core/          @fhirforge/core         createFhirStore, FhirError, the FhirStorage contract. Version-neutral. No I/O.
 │   │   ├── src/store.ts                       Scopes (as / asSystem), authorization checks, audit, data operations.
 │   │   ├── src/access.ts                      authorize / onAudit types: AuthorizeRequest, StoreAuditEvent, StoreAction.
-│   │   └── src/search/                        Index extraction (index-rows.ts), query parsing (query.ts), value
-│   │                                          normalization (values.ts), compiled-parameter types (types.ts).
-│   ├── r4/            @fhirforge/r4           Generated R4 types and search-parameters.ts (src/generated/, committed)
-│   │                                          + the `r4` version descriptor, which carries the compiled search data.
-│   │   ├── scripts/check-examples.ts          Type-checks FHIR JSON examples against the generated types.
+│   │   ├── src/search/                        Index extraction (index-rows.ts), query parsing (query.ts), value
+│   │   │                                      normalization (values.ts), compiled-parameter types (types.ts).
+│   │   └── src/validation/                    Runtime validator (validate.ts) walking the compiled rules (types.ts),
+│   │                                          fixed primitive format checks (primitives.ts).
+│   ├── r4/            @fhirforge/r4           Generated R4 types, search-parameters.ts and validation.ts (src/generated/,
+│   │                                          committed) + the `r4` descriptor, which carries the search and validation data.
+│   │   ├── scripts/check-examples.ts          Type-checks FHIR JSON examples and runs runtime validation on them.
 │   │   └── test/{types,examples}/             Type-level tests and example JSON.
 │   ├── pg/            @fhirforge/pg           Postgres storage: schema, migrations, optimistic locking. Takes a pg Pool or a Database.
 │   │   ├── src/search.ts                      Search SQL builder and index row writes (bind parameters only).
@@ -31,7 +34,8 @@ fhirforge/
 │   ├── pglite/        @fhirforge/pglite       In-process PGlite storage (wraps @fhirforge/pg) for tests and local development.
 │   ├── fhirforge/     fhirforge (unscoped)    Re-exports core, pg and r4: one install for the common setup.
 │   └── store-tests/   (private)               Integration tests on PGlite and, if configured, real Postgres:
-│                                              store.test.ts (CRUD, history), search.test.ts, access.test.ts
+│                                              store.test.ts (CRUD, history, validation on write), search.test.ts,
+│                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
 ├── .changeset/                                Changesets config; all @fhirforge/* packages are versioned together.
@@ -60,9 +64,9 @@ store-tests → everything (private, never published)
 ```bash
 pnpm install
 pnpm build                 # tsc -b over every package, in dependency order
-pnpm test                  # build, Vitest (definitions, codegen, store-tests), type tests, example check
+pnpm test                  # build, Vitest (definitions, codegen, core, store-tests), type tests, example check
 pnpm test:types            # type-level tests only (ts-expect-error / expect-type)
-pnpm test:examples [dir]   # type-check FHIR JSON examples (default: packages/r4/test/examples)
+pnpm test:examples [--no-types] [dir]  # type-check and validate FHIR JSON examples (default: packages/r4/test/examples)
 pnpm gen:r4                # regenerate packages/r4/src/generated from hl7.fhir.r4.core@4.0.1
 pnpm changeset             # record a change for the next release
 pnpm release:check         # build and run every publish check without publishing
@@ -83,14 +87,16 @@ Before finishing any change, run `pnpm test`. If you changed `pg` or `core`, als
 - `moduleResolution: NodeNext` and `verbatimModuleSyntax`: relative imports end in `.js`; type-only imports use `import type`.
 - Each package builds `src/` → `dist/` with project references. Adding a package means: `package.json`, `tsconfig.json` with `references`, the root `build` script, and README.md.
 - `core` has no runtime dependencies and no I/O, and must not need `@types/node` or the DOM lib. Anything that talks to a database lives in an adapter package.
-- `@fhirforge/r4` must stay safe to import in frontend code: types, plus the `r4` descriptor and its generated search data (plain JSON-like objects). Nothing that pulls in Node or database code. Frontends should `import type` so the search data isn't bundled.
+- `@fhirforge/r4` must stay safe to import in frontend code: types, plus the `r4` descriptor and its generated search and validation data (plain JSON-like objects). Nothing that pulls in Node or database code. Frontends should `import type` so that data isn't bundled.
 - Search is compiled, not interpreted: SearchParameter FHIRPath expressions become path data at build time (`codegen/src/search.ts`), and the runtime only walks that data (`core/src/search/index-rows.ts`). Never add a runtime FHIRPath evaluator, `eval` or `new Function`. An expression outside the subset must be reported in `unsupportedSearchParameters`, never approximated.
+- Validation is compiled the same way: `codegen/src/validation.ts` turns StructureDefinitions into element rules, and `core/src/validation/validate.ts` walks them. Primitive formats are fixed, linear-time patterns in `core/src/validation/primitives.ts`; never build a `RegExp` from definition data (spec regexes can backtrack badly). Look up rules through `Map`s, never by indexing plain objects with input keys (`constructor`, `__proto__`). A required binding the validator can't check goes into `unvalidatedBindings`, never guessed.
+- `createFhirStore` validates every `create` and `update` (no opt-out), before the policy check and before any storage call, and requires `validation` in the version package. Every new write path (Bundle entries, patch results) must validate the same way.
 - Adapters take minimal structural interfaces (`PgPoolLike`, `PGliteLike`), not driver types, so drivers stay peer dependencies.
 - Errors the store reports on purpose are `FhirError` (HTTP `status` + FHIR `outcome`). Anything else is a bug or infrastructure failure.
 
 ### Generated code
 
-- `packages/r4/src/generated/` (types and `search-parameters.ts`) is generated by `pnpm gen:r4`. Never edit it by hand; change `packages/codegen` and regenerate.
+- `packages/r4/src/generated/` (types, `search-parameters.ts` and `validation.ts`) is generated by `pnpm gen:r4`. Never edit it by hand; change `packages/codegen` and regenerate.
 - The output is committed. `packages/codegen/test/generate.test.ts` fails if it drifts from the generator, so commit generator changes and regenerated output together.
 - Generate from the official registry package (`hl7.fhir.r4.core`), not third-party copies of the spec: they can contain vendor additions (one added `SubscriptionStatus` to R4).
 
@@ -121,6 +127,7 @@ Update README.md in the same change when you:
 | Changed a public API (`createFhirStore`, store methods, storage factories, options) | **Quick start** and any example using it. The quick start is mirrored in `packages/store-tests/test/readme.ts`, which must compile: update both together |
 | Changed errors or status codes | The error list under **Quick start** |
 | Changed tables, schema names, migration behavior or required database privileges | **Storage layout** |
+| Changed validation: rules checked, what's not checked, error shape | **Validation** (under Quick start) |
 | Changed search: parameter types, modifiers, prefixes, `_sort` / `_count`, policies, or what's unsupported | **Search** (its table and the "Not supported yet" list) |
 | Regenerated types and the counts changed | The resource / datatype / primitive counts in the **Packages** table |
 | Changed what the types enforce (bindings, choice types, references) | **Why the types are stricter than usual** |
@@ -157,6 +164,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | `authorize` policy (required; `'allow-all'` is the explicit opt-out), `store.as(ctx)`, `store.asSystem(reason)` | In place |
 | Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
 | `onAudit` hook: every data operation, including denials and failures, without content or search values | In place |
+| Runtime validation of every write against the base spec (paths-only issues, ≤ 100 issues, nesting depth ≤ 64, linear-time primitive checks) | In place (tested in `validation.test.ts`, `store.test.ts`, `access.test.ts`) |
 | Built-in append-only audit table | Planned |
 | Field-level encryption (`encryptor` hook, envelope encryption, key ID per row) | Planned |
 | Per-search-parameter index policy | Partly: `plaintext` and `none` in place; `blind` planned (rejected at `createFhirStore`) |
@@ -168,7 +176,7 @@ Know what exists before you rely on it. Update this table when that changes.
 Resource content, identifiers, names, birth dates, addresses, phone numbers, emails, free text, attachments and query parameters can all be PHI.
 
 - **No logging of PHI.** Library code must not call `console.*` or write to any logger with resource content, search parameters, SQL parameters or request bodies. Build-time tools (codegen CLI) may print counts and paths only.
-- **Errors carry no PHI.** `FhirError` messages may include the resource type, id, version and search parameter name, never field values or search values. Names from the request go into messages only if they match a strict name pattern (see `safeName` in `core/src/search/query.ts`); otherwise use a placeholder. When wrapping a driver error, pass it as `cause` and write a new message; don't interpolate the driver message, which can echo values. Never put SQL parameters in an error.
+- **Errors carry no PHI.** `FhirError` messages may include the resource type, id, version and search parameter name, never field values or search values. Validation issues carry the element path and a fixed reason only; element names from the input appear only if they match a strict name pattern (`SAFE_NAME` in `core/src/validation/validate.ts`). Names from the request go into messages only if they match a strict name pattern (see `safeName` in `core/src/search/query.ts`); otherwise use a placeholder. When wrapping a driver error, pass it as `cause` and write a new message; don't interpolate the driver message, which can echo values. Never put SQL parameters in an error.
 - **Ids can be PHI.** Server-assigned ids are random UUIDs. Client-assigned ids (update-as-create) might be MRNs or other identifiers. Treat ids as sensitive in anything that leaves the process, and recommend in docs that apps don't use real-world identifiers as ids.
 - **No PHI in telemetry.** When tracing (e.g. OpenTelemetry) is added, spans may record resource type, operation, duration and status, never ids of client-assigned resources, content or parameters.
 - **No stack traces or internals in outcomes.** OperationOutcome `diagnostics` returned to clients (HTTP adapters, later) must not include stack traces, SQL or driver messages.
@@ -255,10 +263,11 @@ Run this on every change before finishing. If any answer is "no" or "not sure", 
 6. **Migrations:** new migrations are appended, idempotent, inside `migrate()`'s transaction; no shipped migration was edited.
 7. **Crypto (if touched):** vetted primitives, random nonces, authenticated encryption, keys supplied by the app, key ID stored with ciphertext.
 8. **Search and indexes (if touched):** new values reach SQL only through `bind()`; new parameters, modifiers or sort keys are validated against allow-lists; request limits cover the new feature; each new searchable field honors the plaintext / none policy, and the default is documented; new derived data cascades with the resource.
-9. **Authorization and audit:** the new operation runs inside a scope, calls the policy with the content it touches, pins writes to the approved version, hides denied reads as 404, and emits one audit event without content or values; no new bypass.
-10. **Dependencies:** no new runtime dependency without justification; lockfile updated; no new install scripts allowed without reason.
-11. **Tests:** synthetic data only; a test covers the security-relevant behavior (e.g. an error message contains no field values; a stale `ifMatch` fails).
-12. **Docs:** README.md and this file reflect the change, including the security status table.
+9. **Validation:** a new write path validates the resource (`createValidator` rules) before the policy check; new validation rules are compiled data, report paths only, and stay bounded (depth, issue count, linear-time checks).
+10. **Authorization and audit:** the new operation runs inside a scope, calls the policy with the content it touches, pins writes to the approved version, hides denied reads as 404, and emits one audit event without content or values; no new bypass.
+11. **Dependencies:** no new runtime dependency without justification; lockfile updated; no new install scripts allowed without reason.
+12. **Tests:** synthetic data only; a test covers the security-relevant behavior (e.g. an error message contains no field values; a stale `ifMatch` fails).
+13. **Docs:** README.md and this file reflect the change, including the security status table.
 
 ### How to bring code into line
 
