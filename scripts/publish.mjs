@@ -90,8 +90,10 @@ for (const dir of ORDER) {
     process.exit(1);
   }
 
-  const publishArgs = ['publish', tarball, '--access', 'public'];
-  if (distTag) publishArgs.push('--tag', distTag);
+  // Always pass the dist-tag explicitly. npm won't implicitly tag a version
+  // `latest` when a higher one exists, and `fhirforge` has a 1.0.0 name
+  // placeholder (deprecated) above the 0.x releases.
+  const publishArgs = ['publish', tarball, '--access', 'public', '--tag', distTag ?? 'latest'];
   if (dryRun) publishArgs.push('--dry-run');
   // In GitHub Actions, npm uses trusted publishing (OIDC) and adds provenance automatically.
   console.log(`${dryRun ? 'would publish' : 'publish'} ${id} (${files.filter((f) => !f.endsWith('/')).length} files)${inCi ? ' via trusted publishing' : ''}`);

@@ -210,7 +210,10 @@ pnpm version-packages          # applies .changeset/initial-release.md → 0.1.0
 git commit -am "Version packages" && git push
 pnpm release                   # build, check and publish all seven packages
 git push origin --tags
+npm deprecate fhirforge@1.0.0 "Name placeholder. Use the latest 0.x release."
 ```
+
+`fhirforge@1.0.0` is an empty name placeholder, so it's higher than the 0.x releases. `scripts/publish.mjs` always passes the dist-tag explicitly (`latest` unless `--tag` is given), because npm otherwise refuses to tag a lower version `latest`.
 
 Then, for each of the seven packages on npmjs.com: Settings → Trusted publishing → GitHub Actions, repository `schlegz/fhirforge`, workflow `release.yml`. From then on, releases go through the pull request.
 
