@@ -17,6 +17,8 @@ fhirforge/
 │   │   ├── src/fhirpath.ts                    Parser for the FHIRPath subset used by search expressions (rejects the rest).
 │   │   └── src/search.ts                      Compiles SearchParameters into path steps → generated search-parameters.ts.
 │   ├── core/          @fhirforge/core         createFhirStore, FhirError, the FhirStorage contract. Version-neutral. No I/O.
+│   │   ├── src/store.ts                       Scopes (as / asSystem), authorization checks, audit, data operations.
+│   │   ├── src/access.ts                      authorize / onAudit types: AuthorizeRequest, StoreAuditEvent, StoreAction.
 │   │   └── src/search/                        Index extraction (index-rows.ts), query parsing (query.ts), value
 │   │                                          normalization (values.ts), compiled-parameter types (types.ts).
 │   ├── r4/            @fhirforge/r4           Generated R4 types and search-parameters.ts (src/generated/, committed)
@@ -29,7 +31,8 @@ fhirforge/
 │   ├── pglite/        @fhirforge/pglite       In-process PGlite storage (wraps @fhirforge/pg) for tests and local development.
 │   ├── fhirforge/     fhirforge (unscoped)    Re-exports core, pg and r4: one install for the common setup.
 │   └── store-tests/   (private)               Integration tests on PGlite and, if configured, real Postgres:
-│                                              store.test.ts (CRUD, history), search.test.ts, transport.test.ts,
+│                                              store.test.ts (CRUD, history), search.test.ts, access.test.ts
+│                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
 ├── .changeset/                                Changesets config; all @fhirforge/* packages are versioned together.
 ├── .github/workflows/ci.yml                   CI: Postgres 18 service, FHIR package cache, `pnpm test`.
@@ -142,8 +145,10 @@ Know what exists before you rely on it. Update this table when that changes.
 | Errors never echo search values, invalid ids or invalid type names | In place (tested in `search.test.ts`) |
 | Search index rows written in the write transaction; removed by FK cascade with the resource | In place |
 | Search limits: `_count` ≤ 1000, ≤ 100 values per parameter, ≤ 50 clauses, `_offset` ≤ 100000 | In place |
-| `authorize(ctx, action, resource)` hook and `store.as(ctx)` | Planned |
-| `onAudit` hook and append-only audit table | Planned |
+| `authorize` policy (required; `'allow-all'` is the explicit opt-out), `store.as(ctx)`, `store.asSystem(reason)` | In place |
+| Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
+| `onAudit` hook: every data operation, including denials and failures, without content or search values | In place |
+| Built-in append-only audit table | Planned |
 | Field-level encryption (`encryptor` hook, envelope encryption, key ID per row) | Planned |
 | Per-search-parameter index policy | Partly: `plaintext` and `none` in place; `blind` planned (rejected at `createFhirStore`) |
 | Expunge (remove all versions and index rows) | Planned |
@@ -193,11 +198,21 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 - History keeps PHI after update and delete. When adding expunge, it must remove every version, every search index row and every derived copy for that resource, in one transaction, and be its own explicitly named operation (never a side effect of `delete`).
 - Optimistic locking must stay race-free: read-then-write paths lock the row (`FOR UPDATE`) inside the transaction.
 
-### 7. Access control and audit (planned; requirements for when they're built)
+### 7. Access control and audit
 
-- Every store operation will go through `store.as(ctx)` and an app-supplied `authorize(ctx, action, resourceType, resource?)` policy. Default-deny: if a policy is configured and doesn't allow the action, throw a 403 `FhirError` with code `forbidden`. Searches must filter results by the policy, not just check the query.
-- The `onAudit` hook receives who (from ctx), what action, which resource type and id, when, and the outcome. It records ids and actions, never resource content. Audit failures must not be silently dropped: make the behavior explicit (fail the operation or call an error hook).
-- Bypassing authorization (e.g. for migrations or system jobs) must be explicit and visible in code (`store.asSystem()` or similar), never a default.
+How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these properties when changing it:
+
+- `authorize` is required at `createFhirStore`: a policy function or the literal `'allow-all'`. Never add an implicit default.
+- With a policy, data operations go through `store.as(ctx)`. Calling them on the store directly throws 403. `store.asSystem(reason)` bypasses the policy, needs a non-empty reason and is audited as `system: true`. Don't add other bypasses.
+- Only `true` (or, for `search`, `{ filter }`) allows. Anything else, including a thrown error, denies.
+- The policy sees the content: the new resource for `create`; the stored resource for `read`, `vread`, `history` and `delete`; both stored and new for `update`. Check after loading, before returning or writing.
+- Denied `read`, `vread`, `history`, `update` (of a stored resource) and `delete` throw the same 404 as a missing resource. Denied `create`, `search`, and update with denied new content throw 403. Don't leak existence in error messages.
+- Writes after a policy check are pinned: `update` passes `ifMatch` (the approved version) or `ifNoneExist`, and `delete` passes `ifMatch`, so a concurrent change fails with 412. Any new write path (Bundles, patch) must do the same.
+- Search: the policy's `filter` is ANDed into the query (it can't set `_count`, `_offset` or `_sort`), and every result is checked again as a `read`. If any result is removed, `total` is omitted.
+- `onAudit` gets one `StoreAuditEvent` per data operation (success, denied, not-found, error): `ctx`, system and reason, action, resource type, id, version, outcome, status, and for searches the parameter names and returned ids. Never add resource content, search values or error messages to events.
+- If `onAudit` throws, the operation fails and the result is withheld (writes have already committed), unless the app passes `onAuditError`. Don't swallow audit errors anywhere else.
+- `migrate()` and `reindex()` are maintenance operations on the store and are not audited. Don't expose resource data through them.
+- New data operations (Bundles, `_include`, chained search, HTTP adapters) must go through the same scope, policy and audit path. An `_include`d or chained resource is a read of that resource and needs its own check.
 
 ### 8. Test data and fixtures
 
@@ -228,7 +243,7 @@ Run this on every change before finishing. If any answer is "no" or "not sure", 
 6. **Migrations:** new migrations are appended, idempotent, inside `migrate()`'s transaction; no shipped migration was edited.
 7. **Crypto (if touched):** vetted primitives, random nonces, authenticated encryption, keys supplied by the app, key ID stored with ciphertext.
 8. **Search and indexes (if touched):** new values reach SQL only through `bind()`; new parameters, modifiers or sort keys are validated against allow-lists; request limits cover the new feature; each new searchable field honors the plaintext / none policy, and the default is documented; new derived data cascades with the resource.
-9. **Authorization and audit (once built):** the new operation goes through `authorize` and `onAudit`; no silent bypass.
+9. **Authorization and audit:** the new operation runs inside a scope, calls the policy with the content it touches, pins writes to the approved version, hides denied reads as 404, and emits one audit event without content or values; no new bypass.
 10. **Dependencies:** no new runtime dependency without justification; lockfile updated; no new install scripts allowed without reason.
 11. **Tests:** synthetic data only; a test covers the security-relevant behavior (e.g. an error message contains no field values; a stale `ifMatch` fails).
 12. **Docs:** README.md and this file reflect the change, including the security status table.
@@ -242,4 +257,5 @@ When you find code that breaks these rules, fix it the same way every time:
 - **A write path outside a transaction:** move all statements for one logical write into `database.transaction`, lock the current row first if the write depends on it, and add a concurrent test in `store-tests` (it runs on real Postgres in CI).
 - **A runtime DDL statement:** move it into a new migration in `migrations.ts`.
 - **A feature that stores a new copy of PHI** (index, cache, audit detail): add it to the expunge requirements above, give it a policy, and document it in README.md's storage layout.
-- **A missing planned control that the change depends on** (e.g. you're adding an HTTP adapter and `authorize` doesn't exist yet): don't ship a weaker version quietly. Stop and say what's missing, or implement the control first.
+- **A data path that skips the policy** (e.g. a helper that calls `storage` directly): route it through `operations(scope)` in `store.ts`, add a denied-access test in `access.test.ts` (including that the denied result isn't returned or audited as success).
+- **A missing planned control that the change depends on** (e.g. you're adding a feature that needs the built-in audit table): don't ship a weaker version quietly. Stop and say what's missing, or implement the control first.

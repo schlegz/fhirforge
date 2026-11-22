@@ -5,7 +5,7 @@ import { backends } from './backends.js';
 
 // Synthetic data only (see CLAUDE.md).
 const RESOURCES = ['Patient', 'Observation', 'Encounter', 'MedicationRequest'] as const;
-const makeStore = (storage: FhirStorage) => createFhirStore({ storage, fhir: r4, resources: RESOURCES });
+const makeStore = (storage: FhirStorage) => createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: RESOURCES });
 
 async function fhirError(fn: () => Promise<unknown>): Promise<FhirError> {
   try {
@@ -254,11 +254,11 @@ describe.each(backends)('search on $name', (backend) => {
       // A store whose version package has no search parameters writes without indexing.
       const storage = await backend.storage();
       const noSearch: FhirVersionPackage<ResourceTypeMap> = { fhirVersion: '4.0.1' };
-      const plain = createFhirStore({ storage, fhir: noSearch, resources: ['Patient'] });
+      const plain = createFhirStore({ authorize: 'allow-all', storage, fhir: noSearch, resources: ['Patient'] });
       await plain.migrate();
       await plain.create({ resourceType: 'Patient', name: [{ family: 'Unindexed' }] });
 
-      const store = createFhirStore({ storage, fhir: r4, resources: ['Patient'] });
+      const store = createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'] });
       expect((await store.search('Patient', { family: 'unindexed' })).total).toBe(0);
       expect(await store.reindex()).toEqual({ Patient: 1 });
       expect((await store.search('Patient', { family: 'unindexed' })).total).toBe(1);
@@ -300,6 +300,7 @@ describe.each(backends)('search on $name', (backend) => {
     it('does not index or search parameters with policy "none"', async () => {
       const storage = await backend.storage();
       const store = createFhirStore({
+        authorize: 'allow-all',
         storage,
         fhir: r4,
         resources: ['Patient'],
@@ -314,10 +315,10 @@ describe.each(backends)('search on $name', (backend) => {
     it('rejects blind indexing (planned) and unknown policy keys at creation', async () => {
       const storage = await backend.storage();
       expect(() =>
-        createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.name': 'blind' } } }),
+        createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.name': 'blind' } } }),
       ).toThrow(/not implemented/);
       expect(() =>
-        createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.nope': 'none' } } }),
+        createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.nope': 'none' } } }),
       ).toThrow(/unknown parameter/);
     });
   });

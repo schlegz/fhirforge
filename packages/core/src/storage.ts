@@ -32,12 +32,20 @@ export interface FhirStorage {
   /**
    * Writes a new version, or version 1 if the resource doesn't exist yet
    * (FHIR update-as-create). With `ifMatch`, throws FhirError.versionConflict
-   * unless the current version equals it.
+   * unless the current version equals it. With `ifNoneExist`, throws it if the
+   * resource exists at all (even deleted). Checked under the row lock.
    */
-  update(resource: AnyResource & { id: string }, options?: { ifMatch?: string } & WriteOptions): Promise<UpdateResult>;
+  update(
+    resource: AnyResource & { id: string },
+    options?: { ifMatch?: string; ifNoneExist?: boolean } & WriteOptions,
+  ): Promise<UpdateResult>;
 
-  /** Records a delete as a new version and removes the resource's index rows. Returns undefined if there was nothing to delete. */
-  delete(resourceType: string, id: string): Promise<StoredVersion | undefined>;
+  /**
+   * Records a delete as a new version and removes the resource's index rows.
+   * Returns undefined if there was nothing to delete. With `ifMatch`, throws
+   * FhirError.versionConflict unless the current version equals it.
+   */
+  delete(resourceType: string, id: string, options?: { ifMatch?: string }): Promise<StoredVersion | undefined>;
 
   /** The current version, including a deleted one (with `deleted: true`). */
   read(resourceType: string, id: string): Promise<StoredVersion | undefined>;

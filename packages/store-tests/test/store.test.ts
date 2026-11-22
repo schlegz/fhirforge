@@ -7,7 +7,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { backends } from './backends.js';
 
 const makeStore = (storage: FhirStorage) =>
-  createFhirStore({ storage, fhir: r4, resources: ['Patient', 'Observation'] });
+  createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient', 'Observation'] });
 
 /** Runs `fn` and returns the FhirError it throws. */
 async function fhirError(fn: () => Promise<unknown>): Promise<FhirError> {

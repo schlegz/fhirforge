@@ -49,8 +49,12 @@ export interface MigrationResult {
 /** One page of search results. */
 export interface SearchResult<T> {
   resources: T[];
-  /** Number of matches across all pages. */
-  total: number;
+  /**
+   * Number of matches across all pages. Omitted when the access policy removed
+   * results after the query ran (it would count resources the caller can't see).
+   * Use a search `filter` in the policy to keep totals exact.
+   */
+  total?: number;
   /** Parameters for the next page, or undefined on the last page. */
   next?: Record<string, string | number | boolean | readonly (string | number)[] | undefined>;
 }

@@ -5,7 +5,7 @@ import { r4, type Observation, type Patient } from '@fhirforge/r4';
 import { expectTypeOf } from 'expect-type';
 
 declare const storage: FhirStorage;
-const fhir = createFhirStore({ storage, fhir: r4, resources: ['Patient', 'Observation'] });
+const fhir = createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient', 'Observation'] });
 
 export async function typed(): Promise<void> {
   // read() returns the version package's type for that resource.
@@ -38,16 +38,35 @@ export async function typed(): Promise<void> {
   // search() returns the stored resource type.
   const found = await fhir.search('Patient', { family: 'doe', _count: 10 });
   expectTypeOf(found.resources).toEqualTypeOf<Stored<Patient>[]>();
-  expectTypeOf(found.total).toEqualTypeOf<number>();
+  expectTypeOf(found.total).toEqualTypeOf<number | undefined>();
 
   // Search policy keys are checked against the configured resource types.
-  createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'none' } } });
+  createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'none' } } });
   // @ts-expect-error Observation is not configured
-  createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Observation.code': 'none' } } });
+  createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Observation.code': 'none' } } });
   // @ts-expect-error not a policy
-  createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'hidden' } } });
+  createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'hidden' } } });
+
+  // authorize is required: a policy or the explicit 'allow-all'.
+  // @ts-expect-error authorize missing
+  createFhirStore({ storage, fhir: r4, resources: ['Patient'] });
+
+  // The policy's ctx type flows to as().
+  interface Session {
+    userId: string;
+    patientId?: string;
+  }
+  const guarded = createFhirStore({
+    storage,
+    fhir: r4,
+    resources: ['Patient'],
+    authorize: ({ ctx }: { ctx: Session }) => ctx.userId !== '',
+  });
+  await guarded.as({ userId: 'u1' }).read('Patient', '1');
+  // @ts-expect-error ctx must be a Session
+  guarded.as({ user: 'u1' });
 
   // resources must be real resource types of the version.
   // @ts-expect-error Patiant is not an R4 resource type
-  createFhirStore({ storage, fhir: r4, resources: ['Patiant'] });
+  createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patiant'] });
 }

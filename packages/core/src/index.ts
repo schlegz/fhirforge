@@ -1,4 +1,14 @@
-export { createFhirStore, type CreateFhirStoreOptions, type FhirStore } from './store.js';
+export { createFhirStore, type CreateFhirStoreOptions, type FhirStore, type FhirDataOperations } from './store.js';
+export type {
+  AccessOptions,
+  StoreAuditEvent,
+  AuditOutcome,
+  AuditSink,
+  AuthorizePolicy,
+  AuthorizeRequest,
+  AuthorizeResult,
+  StoreAction,
+} from './access.js';
 export { FhirError, isFhirError, type IssueCode, type OperationOutcomeLike } from './errors.js';
 export { stampMeta, type FhirStorage, type Indexer, type StoredVersion, type UpdateResult, type WriteOptions } from './storage.js';
 export type { AnyResource, FhirVersionPackage, HistoryEntry, MigrationResult, ResourceMapOf, SearchResult, Stored } from './types.js';

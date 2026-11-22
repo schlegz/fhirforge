@@ -2,7 +2,7 @@
 
 Embeddable FHIR storage for Node and TypeScript. Add it to any app to store, search and manage FHIR resources in your own Postgres database. It's a library, not a server: your app keeps control of the connection, transactions, auth and HTTP.
 
-> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite. Transactions (Bundles), auth and audit hooks, and HTTP adapters are next.
+> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with access control and audit hooks. Transactions (Bundles) and HTTP adapters are next.
 
 ## Quick start
 
@@ -16,6 +16,7 @@ const fhir = createFhirStore({
   storage: pgliteStorage(new PGlite()), // or postgresStorage(pool) from @fhirforge/pg
   fhir: r4,
   resources: ['Patient', 'Observation'],
+  authorize: 'allow-all', // required: a policy function, or 'allow-all' (see Access control)
 });
 await fhir.migrate(); // creates the "fhir" schema and tables; safe on every startup
 
@@ -32,6 +33,41 @@ page.resources; // Stored<Patient>[]; page.total counts all matches; page.next h
 Errors are `FhirError`s with an HTTP `status` and a FHIR `outcome` (OperationOutcome): 400 invalid or unsupported, 404 not found, 410 deleted, 412 version conflict.
 
 Ids are server-assigned UUIDs. `update` also accepts a client-chosen id (update-as-create), but don't use real-world identifiers such as MRNs as ids: ids appear in references, URLs and error messages, so they shouldn't be PHI. Put identifiers in `identifier`.
+
+### Access control and audit
+
+`authorize` is required, so running without access control is always a visible choice. With a policy, every call goes through a scope:
+
+```ts
+const fhir = createFhirStore({
+  storage,
+  fhir: r4,
+  resources: ['Patient', 'Observation'],
+  authorize: ({ ctx, action, resourceType, resource }: AuthorizeRequest<Session>) => {
+    if (ctx.role === 'clinician') return true;
+    if (action === 'search') {
+      // ANDed into the caller's query. (Patient has no `patient` parameter, so filter by _id.)
+      return { filter: resourceType === 'Patient' ? { _id: ctx.patientId } : { patient: ctx.patientId } };
+    }
+    return resource?.resourceType === 'Patient'
+      ? resource.id === ctx.patientId
+      : (resource as Observation | undefined)?.subject?.reference === `Patient/${ctx.patientId}`;
+  },
+  onAudit: (event) => auditLog.write(event),
+});
+
+await fhir.as(session).read('Patient', id); // checked and audited with `session`
+await fhir.asSystem('nightly export').search('Patient', {}); // bypasses the policy, audited with the reason
+await fhir.read('Patient', id); // 403: no caller context
+```
+
+- Only `true` allows. `false`, `undefined`, any other value or a thrown error denies.
+- The policy sees the content an action touches: the new resource for `create`, the stored one for `read`, `vread`, `history` and `delete`, and both the stored and the new version for `update`. The write then runs against exactly the version the policy approved, so a concurrent change fails with 412 instead of slipping through.
+- A denied read, update or delete returns 404, the same as a missing resource, so callers can't probe for what exists. A denied `create` or `search` returns 403.
+- For `search`, return `{ filter: { … } }` to restrict the query; totals and paging stay exact. Results are also checked one by one, and if any is removed the result's `total` is omitted.
+- `onAudit` receives one event per operation, including denied and failed ones: who (`ctx`, or `system` with the reason), the action, resource type, id, version, outcome and status, and for searches the parameter names and returned ids. Events never include resource content or search values. If `onAudit` throws, the operation fails and the result is withheld (a write has already committed); pass `onAuditError` to handle audit failures yourself.
+
+`migrate()` and `reindex()` are maintenance operations on the store itself and aren't audited.
 
 ### Search
 
@@ -54,7 +90,7 @@ Not supported yet: composite and special parameters, chaining (`subject.name=`),
 **Search policy.** Index rows are readable copies of resource data, so each parameter can be configured:
 
 ```ts
-createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'none' } } });
+createFhirStore({ storage, fhir: r4, resources: ['Patient'], authorize, search: { policy: { 'Patient.birthdate': 'none' } } });
 ```
 
 `plaintext` (default) indexes the value for full search. `none` doesn't index it and makes it unsearchable. `blind` (keyed-hash, exact match only) is planned. After changing the policy, run `await fhir.reindex()`.
@@ -79,12 +115,12 @@ The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on these tables,
 | `@fhirforge/definitions` | Build-time. Loads official FHIR packages (e.g. `hl7.fhir.r4.core@4.0.1`) from packages.fhir.org into the standard `~/.fhir/packages` cache, indexes StructureDefinitions, ValueSets, CodeSystems and SearchParameters, and builds element trees. |
 | `@fhirforge/codegen` | Build-time. Generates strict TypeScript types for a FHIR version and compiles its search parameters' FHIRPath expressions into plain path data (`fhirforge-codegen` CLI). |
 | `@fhirforge/r4` | Generated FHIR R4 types (146 resources, 41 datatypes, 20 primitives, `ResourceTypeMap`) and compiled search parameters. Use `import type` in frontend code so the search data isn't bundled. |
-| `@fhirforge/core` | `createFhirStore`: version-neutral, typed from the version package you pass in. No I/O of its own. |
+| `@fhirforge/core` | `createFhirStore`: version-neutral, typed from the version package you pass in, with `authorize` / `onAudit` hooks. No I/O of its own. |
 | `@fhirforge/pg` | Postgres storage: takes a `pg` Pool (or any `Database`), with migrations, optimistic locking, search indexes and TLS enforcement. |
 | `@fhirforge/pglite` | In-process [PGlite](https://pglite.dev) storage: real Postgres with no server, for tests and local development. |
 | `fhirforge` | One install for the common setup: re-exports `core`, `pg` and `r4`. |
 
-Planned: Bundle transactions, `authorize` / `onAudit` hooks, chained search and `_include`, `@fhirforge/next`, `@fhirforge/express`.
+Planned: Bundle transactions, chained search and `_include`, `@fhirforge/next`, `@fhirforge/express`.
 
 ## Why the types are stricter than usual
 
@@ -115,8 +151,9 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - `postgresStorage(pool)` refuses a non-TLS connection to a non-local host (`ssl`, or `sslmode=require` / `verify-ca` / `verify-full`). `{ allowInsecure: true }` overrides it for development only. A custom `Database` is your responsibility.
 - Errors (`FhirError`) name the resource type, id, version or search parameter, never field or search values. The library doesn't log resource content.
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
+- Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
 
-What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), access control and audit logging. Planned in fhirforge: `authorize` and `onAudit` hooks, field-level encryption, blind (keyed-hash) search indexes and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
+What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and a durable destination for audit events. Planned in fhirforge: a built-in append-only audit table, field-level encryption, blind (keyed-hash) search indexes and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
 
 ## Development
 

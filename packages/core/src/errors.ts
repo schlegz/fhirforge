@@ -59,6 +59,10 @@ export class FhirError extends Error {
     return new FhirError(409, 'duplicate', `${resourceType}/${id} already exists`);
   }
 
+  static forbidden(message: string): FhirError {
+    return new FhirError(403, 'forbidden', message);
+  }
+
   /** If-Match / expected version did not match the current version. */
   static versionConflict(resourceType: string, id: string, expected: string, actual: string | undefined): FhirError {
     return new FhirError(

@@ -150,6 +150,9 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
           if (opts.ifMatch !== undefined && opts.ifMatch !== current?.v) {
             throw FhirError.versionConflict(resourceType, id, opts.ifMatch, current?.v);
           }
+          if (opts.ifNoneExist && current) {
+            throw FhirError.versionConflict(resourceType, id, 'none', current.v);
+          }
           if (!current) {
             return { version: await writeVersion(tx, resourceType, id, 1, resource, true, opts.index), created: true };
           }
@@ -159,10 +162,13 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       );
     },
 
-    delete(resourceType, id) {
+    delete(resourceType, id, opts = {}) {
       return run(resourceType, () =>
         database.transaction(async (tx) => {
           const current = await lockCurrent(tx, resourceType, id);
+          if (opts.ifMatch !== undefined && opts.ifMatch !== current?.v) {
+            throw FhirError.versionConflict(resourceType, id, opts.ifMatch, current?.v);
+          }
           if (!current || current.deleted) return undefined;
           return writeVersion(tx, resourceType, id, Number(current.v) + 1, null, false, undefined);
         }),
