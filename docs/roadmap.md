@@ -2,7 +2,7 @@
 
 What's built, what's next and in what order, and the decisions still open. Keep this current: when you finish an item, move it to **Done** and update README.md and CLAUDE.md in the same change (CLAUDE.md, "Keeping README.md in sync"). Claude: read CLAUDE.md first; its security rules apply to everything below.
 
-_Last updated: 2026-11-22, after runtime validation._
+_Last updated: 2026-11-22, after the 0.2.0 release from CI._
 
 ## Done
 
@@ -13,19 +13,11 @@ _Last updated: 2026-11-22, after runtime validation._
 - **Security:** TLS enforcement for remote `pg` Pools; required `authorize` policy with `as(ctx)` / `asSystem(reason)`; `onAudit`; denied reads hidden as 404; writes pinned to the approved version; errors never echo values.
 - **Runtime validation** (roadmap item 2): rules compiled from the StructureDefinitions into `@fhirforge/r4`'s `validation`, walked by `core/src/validation/`. Checks unknown elements, cardinality, types, choice elements, required `code` bindings, primitive formats and contained resources. `create` / `update` validate before the policy check; 400 with one path-only issue per problem. All 5,293 valid R4 spec examples pass; the 16 that break the base spec are rejected (`pnpm test:examples --no-types <examples package>`).
 - **Release pipeline:** Changesets, `scripts/publish.mjs` with tarball checks, `release.yml` for trusted publishing.
+- **Releases from CI** (roadmap item 1): 0.2.0 (runtime validation) went out from `release.yml` on 2026-11-22 via trusted publishing, with a provenance attestation on every package. It took four attempts of the release job; what went wrong is under **Release notes for maintainers** below.
 
 ## Next, in order
 
-### 1. Finish the release pipeline (small, do first)
-
-0.1.0 went out from a laptop (no provenance attestation), as planned for the first release. To move releases to CI:
-
-- On npmjs.com, for each of the seven packages: **Settings → Trusted publishing → GitHub Actions**, repository `schlegz/fhirforge`, workflow `release.yml`. If the account uses staged publishing, allow staged publish there too.
-- Ship a small patch (e.g. a docs fix) through the full flow: `pnpm changeset` → merge to `main` → merge the "Version packages" PR.
-- Done when: the patch is on npm from GitHub Actions, and `npm view @fhirforge/core@<version> dist.attestations` shows a provenance attestation.
-- Unverified: `changesets/action@v1` in `release.yml` was not checked against the action's current major version.
-
-### 2. Bundle transactions and batches
+### 1. Bundle transactions and batches
 
 - `transaction`: all entries in one database transaction, all-or-nothing; resolve `urn:uuid:` `fullUrl` references between entries (see `packages/r4/test/examples/bundle-transaction.json`); return a `transaction-response` Bundle.
 - `batch`: entries independent, each with its own status.
@@ -33,7 +25,7 @@ _Last updated: 2026-11-22, after runtime validation._
 - Needs storage support for running several writes in one transaction (extend the `FhirStorage` contract).
 - Limits: maximum entries per Bundle.
 
-### 3. HTTP adapter: `@fhirforge/next` (then `@fhirforge/express`)
+### 2. HTTP adapter: `@fhirforge/next` (then `@fhirforge/express`)
 
 - A Next.js route handler mapping FHIR REST (`GET/POST/PUT/DELETE /[type]/[id]`, `_history`, search, Bundles at the base URL) to `store.as(ctx)`.
 - The app supplies `ctx` from its own auth; there is no default context.
@@ -41,7 +33,7 @@ _Last updated: 2026-11-22, after runtime validation._
 - Search results as `searchset` Bundles with `self` / `next` links.
 - `/metadata` CapabilityStatement generated from the configured resources and compiled search parameters.
 
-### 4. Search: chaining and `_include` / `_revinclude`
+### 3. Search: chaining and `_include` / `_revinclude`
 
 - `subject:Patient.name=doe`, `_include=Observation:subject`, `_revinclude=Observation:patient`.
 - Each included or chained resource is a read and goes through `authorize` (CLAUDE.md §7); limits on chain depth and include count.
@@ -58,6 +50,15 @@ _Last updated: 2026-11-22, after runtime validation._
 - **More FHIR versions:** `@fhirforge/r5` from `hl7.fhir.r5.core`.
 - **Search gaps:** composite parameters, `:text`, `:above` / `:below`, the `ap` prefix, `_total`, and the expressions listed in `unsupportedSearchParameters`.
 - **Optional multi-tenancy** with Postgres row-level security.
+
+## Release notes for maintainers
+
+Learned from the 0.2.0 release (run 45072636883, four attempts):
+
+- **Trusted publisher not configured → 404** on the first `npm publish` ("could not be found or you do not have permission"), even though the log says "using npm trusted publishing". Every package needs its own trusted publisher entry.
+- **Trusted publisher that doesn't allow direct publish → 403** "OIDC permission denied for this action". `scripts/publish.mjs` runs a plain `npm publish`, so each entry must allow publishing, not only staged publishing. Configure all seven packages before re-running: the script stops at the first failure, which leaves a partly published version.
+- **New versions take minutes to show up.** npm accepted a version (`+ @fhirforge/r4@0.2.0`) that the registry didn't serve for several minutes. The script's "already on npm" check uses `npm view`, so re-running the job inside that window would try to publish the same version again and fail. After a partial release, wait until every accepted version is visible (`npm view <pkg>@<version> version`), then re-run the failed job (`gh run rerun <run-id> --failed`); it skips what's already published.
+- Still unverified: `changesets/action@v1` in `release.yml` was not checked against the action's current major version.
 
 ## Open decisions
 
