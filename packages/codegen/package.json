@@ -3,6 +3,23 @@
   "version": "0.0.1",
   "description": "Generates strict TypeScript types for a FHIR version from its official definitions. Build-time only.",
   "license": "Apache-2.0",
+  "author": "Scott Schlegel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schlegz/fhirforge.git",
+    "directory": "packages/codegen"
+  },
+  "homepage": "https://github.com/schlegz/fhirforge#readme",
+  "bugs": {
+    "url": "https://github.com/schlegz/fhirforge/issues"
+  },
+  "keywords": [
+    "fhir",
+    "hl7",
+    "typescript",
+    "codegen",
+    "types"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -18,6 +35,12 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@fhirforge/definitions": "workspace:*",
     "@fhirforge/core": "workspace:*"

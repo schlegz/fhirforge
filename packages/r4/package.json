@@ -3,6 +3,23 @@
   "version": "0.0.1",
   "description": "Strict TypeScript types for FHIR R4 (4.0.1), generated from the official definitions.",
   "license": "Apache-2.0",
+  "author": "Scott Schlegel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schlegz/fhirforge.git",
+    "directory": "packages/r4"
+  },
+  "homepage": "https://github.com/schlegz/fhirforge#readme",
+  "bugs": {
+    "url": "https://github.com/schlegz/fhirforge/issues"
+  },
+  "keywords": [
+    "fhir",
+    "fhir-r4",
+    "hl7",
+    "typescript",
+    "types"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,6 +33,12 @@
     "dist"
   ],
   "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@fhirforge/core": "workspace:*"
   }

@@ -3,6 +3,22 @@
   "version": "0.0.1",
   "description": "In-process PGlite storage for fhirforge: real Postgres with no server, for tests and local development.",
   "license": "Apache-2.0",
+  "author": "Scott Schlegel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schlegz/fhirforge.git",
+    "directory": "packages/pglite"
+  },
+  "homepage": "https://github.com/schlegz/fhirforge#readme",
+  "bugs": {
+    "url": "https://github.com/schlegz/fhirforge/issues"
+  },
+  "keywords": [
+    "fhir",
+    "pglite",
+    "postgres",
+    "testing"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,7 +28,15 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@fhirforge/core": "workspace:*",
     "@fhirforge/pg": "workspace:*"

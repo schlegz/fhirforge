@@ -3,6 +3,23 @@
   "version": "0.0.1",
   "description": "Postgres storage for fhirforge: JSONB resources and history in their own schema, with migrations.",
   "license": "Apache-2.0",
+  "author": "Scott Schlegel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schlegz/fhirforge.git",
+    "directory": "packages/pg"
+  },
+  "homepage": "https://github.com/schlegz/fhirforge#readme",
+  "bugs": {
+    "url": "https://github.com/schlegz/fhirforge/issues"
+  },
+  "keywords": [
+    "fhir",
+    "postgres",
+    "postgresql",
+    "healthcare",
+    "fhir-store"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,6 +32,12 @@
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@fhirforge/core": "workspace:*"
   },

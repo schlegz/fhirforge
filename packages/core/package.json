@@ -3,6 +3,23 @@
   "version": "0.0.1",
   "description": "Version-neutral FHIR store: typed create, read, update, delete and history over a pluggable storage adapter.",
   "license": "Apache-2.0",
+  "author": "Scott Schlegel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schlegz/fhirforge.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/schlegz/fhirforge#readme",
+  "bugs": {
+    "url": "https://github.com/schlegz/fhirforge/issues"
+  },
+  "keywords": [
+    "fhir",
+    "hl7",
+    "healthcare",
+    "fhir-store",
+    "typescript"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -12,6 +29,14 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
-  "sideEffects": false
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

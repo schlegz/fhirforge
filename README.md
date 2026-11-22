@@ -190,6 +190,30 @@ pnpm test:examples ~/.fhir/packages/hl7.fhir.r4.examples#4.0.1/package
 
 Releases use [Changesets](https://github.com/changesets/changesets); all `@fhirforge/*` packages are versioned together.
 
+## Releasing
+
+All published packages (`@fhirforge/*` and `fhirforge`) share one version and are released together with [Changesets](https://github.com/changesets/changesets). Releases are 0.x while the API settles.
+
+Day to day:
+
+1. With each user-facing change, run `pnpm changeset` and commit the generated file.
+2. When it reaches `main`, the **Release** workflow opens (or updates) a "Version packages" pull request with the version bumps and changelogs.
+3. Merging that pull request publishes the new versions to npm from GitHub Actions and pushes `name@version` tags.
+
+Publishing uses npm trusted publishing: no npm token is stored anywhere, and each package gets a provenance attestation linking it to the commit that built it. `scripts/publish.mjs` publishes only versions not yet on npm, in dependency order, and refuses a dirty working tree, files outside `dist/`, README and LICENSE, or an unresolved `workspace:` version. `pnpm release:check` runs all of that without publishing.
+
+First release (once): trusted publishing can only be configured for packages that already exist on npm, so the first version goes out from your machine.
+
+```bash
+npm login                      # an account in the @fhirforge org, with 2FA
+pnpm version-packages          # applies .changeset/initial-release.md → 0.1.0
+git commit -am "Version packages" && git push
+pnpm release                   # build, check and publish all seven packages
+git push origin --tags
+```
+
+Then, for each of the seven packages on npmjs.com: Settings → Trusted publishing → GitHub Actions, repository `schlegz/fhirforge`, workflow `release.yml`. From then on, releases go through the pull request.
+
 ## License
 
 Apache-2.0. FHIR® is a registered trademark of HL7; this project is not affiliated with or endorsed by HL7. The FHIR specification content these types are generated from is published under CC0.

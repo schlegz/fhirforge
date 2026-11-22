@@ -14,7 +14,9 @@
     "test:examples": "tsx packages/r4/scripts/check-examples.ts",
     "gen:r4": "tsc -b packages/codegen && node packages/codegen/dist/cli.js --package hl7.fhir.r4.core@4.0.1 --out packages/r4/src/generated",
     "changeset": "changeset",
-    "release": "pnpm build && changeset publish"
+    "release": "pnpm build && node scripts/publish.mjs",
+    "release:check": "pnpm build && node scripts/publish.mjs --dry-run",
+    "version-packages": "changeset version && pnpm install --lockfile-only"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",

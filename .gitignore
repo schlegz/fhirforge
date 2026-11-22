@@ -4,3 +4,4 @@ dist/
 .fhir-cache/
 coverage/
 .examples-tmp/
+.release/

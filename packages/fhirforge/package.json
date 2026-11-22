@@ -1,8 +1,26 @@
 {
   "name": "fhirforge",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Embeddable FHIR storage library for Node and TypeScript. In development.",
   "license": "Apache-2.0",
+  "author": "Scott Schlegel",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/schlegz/fhirforge.git",
+    "directory": "packages/fhirforge"
+  },
+  "homepage": "https://github.com/schlegz/fhirforge#readme",
+  "bugs": {
+    "url": "https://github.com/schlegz/fhirforge/issues"
+  },
+  "keywords": [
+    "fhir",
+    "hl7",
+    "healthcare",
+    "typescript",
+    "postgres",
+    "fhir-store"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,13 +33,9 @@
   "files": [
     "dist"
   ],
-  "keywords": [
-    "fhir",
-    "hl7",
-    "healthcare",
-    "typescript",
-    "postgres"
-  ],
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@fhirforge/core": "workspace:*",
     "@fhirforge/pg": "workspace:*",

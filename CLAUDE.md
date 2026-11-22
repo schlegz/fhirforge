@@ -36,6 +36,8 @@ fhirforge/
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
 ├── .changeset/                                Changesets config; all @fhirforge/* packages are versioned together.
 ├── .github/workflows/ci.yml                   CI: Postgres 18 service, FHIR package cache, `pnpm test`.
+├── .github/workflows/release.yml              Release: "Version packages" PR, then npm publish via trusted publishing.
+├── scripts/publish.mjs                        Packs (pnpm) and publishes (npm) unpublished versions, with safety checks.
 ├── tsconfig.base.json                         Shared compiler options (strict, NodeNext, verbatimModuleSyntax, composite).
 ├── tsconfig.json                              Type-checks tests and scripts that aren't part of a package build.
 ├── vitest.config.ts                           Runs packages/*/test/**/*.test.ts.
@@ -62,7 +64,10 @@ pnpm test:types            # type-level tests only (ts-expect-error / expect-typ
 pnpm test:examples [dir]   # type-check FHIR JSON examples (default: packages/r4/test/examples)
 pnpm gen:r4                # regenerate packages/r4/src/generated from hl7.fhir.r4.core@4.0.1
 pnpm changeset             # record a change for the next release
+pnpm release:check         # build and run every publish check without publishing
 ```
+
+Releases (see README.md > Releasing) run from `.github/workflows/release.yml` via `changesets/action`; `scripts/publish.mjs` does the publishing. Don't publish from a laptop except the documented first release.
 
 Environment variables:
 
@@ -110,7 +115,8 @@ Update README.md in the same change when you:
 
 | You changed | Update in README.md |
 | --- | --- |
-| Added, removed or renamed a package | The **Packages** table, the "Planned" line, and the dependency notes |
+| Added, removed or renamed a package | The **Packages** table, the "Planned" line, the dependency notes, the package's own README.md, and `ORDER` in `scripts/publish.mjs` |
+| Changed the release process or workflow | **Releasing** |
 | Changed a public API (`createFhirStore`, store methods, storage factories, options) | **Quick start** and any example using it. The quick start is mirrored in `packages/store-tests/test/readme.ts`, which must compile: update both together |
 | Changed errors or status codes | The error list under **Quick start** |
 | Changed tables, schema names, migration behavior or required database privileges | **Storage layout** |
@@ -223,6 +229,9 @@ How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these propert
 
 - Keep runtime dependencies minimal: `core` has none; adapters depend on `core` and use drivers as peer dependencies. Justify every new runtime dependency in the change description.
 - Commit `pnpm-lock.yaml` and install with `--frozen-lockfile` in CI. Only allow install scripts that are needed (`allowBuilds` in `pnpm-workspace.yaml`).
+- **Publishing:** packages are published only from `release.yml` using npm trusted publishing (OIDC) with provenance. Never add an npm token (`NPM_TOKEN`, `NODE_AUTH_TOKEN`) to the repository or workflows; it would also disable OIDC. Keep the workflow's permissions minimal (`contents`, `pull-requests`, `id-token` on the release job only) and keep `pnpm test` before publish.
+- **What ships:** each package's `files` is `["dist"]`, plus README.md and LICENSE. `scripts/publish.mjs` rejects anything else in a tarball and any leftover `workspace:` version: don't loosen those checks. Every published package needs its own README.md and LICENSE.
+- **Versions:** all published packages are in one Changesets `fixed` group. Add new published packages to `ORDER` in `scripts/publish.mjs` (dependency order) and to the README's packages table.
 - `definitions/src/fetch.ts` extracts tarballs with `tar`. Keep its safe defaults: never set `preservePaths`, and extract only into the cache folder. Downloads go to a temp file and are moved into the cache only after a complete extract.
 - Don't add code that executes content from FHIR packages or user data (no `eval`, `new Function`, dynamic `import()` of data paths).
 
