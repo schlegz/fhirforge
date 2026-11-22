@@ -23,7 +23,8 @@ fhirforge/
 │   │   ├── src/bundle.ts                      Bundle request parsing, urn:uuid reference resolution, response entries, limits.
 │   │   ├── src/access.ts                      authorize / onAudit types: AuthorizeRequest, StoreAuditEvent, StoreAction.
 │   │   ├── src/search/                        Index extraction (index-rows.ts), query parsing (query.ts), value
-│   │   │                                      normalization (values.ts), compiled-parameter types (types.ts).
+│   │   │                                      normalization (values.ts), compiled-parameter types (types.ts),
+│   │   │                                      chains and _include / _revinclude parsing and limits (links.ts).
 │   │   └── src/validation/                    Runtime validator (validate.ts) walking the compiled rules (types.ts),
 │   │                                          fixed primitive format checks (primitives.ts).
 │   ├── r4/            @fhirforge/r4           Generated R4 types, search-parameters.ts and validation.ts (src/generated/,
@@ -42,6 +43,7 @@ fhirforge/
 │                                              bundle.test.ts (transaction / batch, rollback, races, deadlock),
 │                                              http.test.ts (REST handler over real Request objects),
 │                                              audit.test.ts (audit table, atomicity, append-only, runtime-role grants),
+│                                              links.test.ts (chained search, _include / _revinclude, policy, limits),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -172,6 +174,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | Search index rows written in the write transaction; removed by FK cascade with the resource | In place |
 | Search limits: `_count` ≤ 1000, ≤ 100 values per parameter, ≤ 50 clauses, `_offset` ≤ 100000 | In place |
 | REST handler (`@fhirforge/http`, fetch-style and `toNodeHandler`): caller context required (401), generic 500s, `Cache-Control: no-store`, body limit (413), JSON only | In place (tested in `http.test.ts`) |
+| Chained search and `_include` / `_revinclude`: chains run as policy-checked searches on the target type; each include is a policy-checked read; one chain level, ≤ 3 chains, ≤ 100 chain matches, ≤ 5 includes, ≤ 100 included | In place (tested in `links.test.ts`) |
 | Bundle transactions: all writes in one database transaction (`writeAll`, rows locked in a fixed order); every entry validated, authorized, pinned and audited; ≤ 100 entries, ≤ 10 searches | In place (tested in `bundle.test.ts`) |
 | `authorize` policy (required; `'allow-all'` is the explicit opt-out), `store.as(ctx)`, `store.asSystem(reason)` | In place |
 | Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
@@ -202,7 +205,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 - Validate input shape before it reaches SQL (e.g. `vread` rejects non-numeric versions), so malformed input becomes a 400/404, not a database error.
 - Search SQL is built in `pg/src/search.ts` through the `Sql.bind()` helper only. A search value must never become SQL text. Parameter codes, modifiers, prefixes and sort keys are validated in `core/src/search/query.ts` against the compiled definitions and fixed allow-lists before they reach the adapter; keep it that way for new features (chaining, `_include`, composite).
 - Escape LIKE wildcards (`likeEscape`) for any pattern built from a search value, and bind range parameters lazily (only when the SQL uses them): Postgres rejects bind parameters it can't type.
-- Keep the request limits (`MAX_COUNT`, `MAX_VALUES`, `MAX_CLAUSES`, `MAX_OFFSET`, `MAX_BUNDLE_ENTRIES`, `MAX_BUNDLE_SEARCHES`) in place; new search features (chains, includes) need their own limits so one request can't make the database do unbounded work.
+- Keep the request limits (`MAX_COUNT`, `MAX_VALUES`, `MAX_CLAUSES`, `MAX_OFFSET`, `MAX_BUNDLE_ENTRIES`, `MAX_BUNDLE_SEARCHES`, `MAX_CHAINS`, `MAX_CHAIN_MATCHES`, `MAX_INCLUDE_PARAMS`, `MAX_INCLUDED`) in place; new search features (chains, includes) need their own limits so one request can't make the database do unbounded work.
 
 ### 3. Database roles and schema
 
@@ -245,7 +248,8 @@ How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these propert
 - If `onAudit` throws, the operation fails and the result is withheld (writes have already committed), unless the app passes `onAuditError`. Don't swallow audit errors anywhere else.
 - The audit table (`audit: { table: true, actor }`): successful writes pass their rows to the storage write (`withRows` in `audited`, `pendingRows` for Bundles), so data and audit commit together; reads and failures go through `storage.recordAudit`. Table failures are never swallowed (`onAuditError` doesn't apply to them). Rows hold the event's fields plus `actor` from the app's mapping: never store `ctx`, content, search values or error messages. A Bundle's entries share the Bundle's `operationId`. fhirforge never deletes audit rows, and expunge (later) must not either.
 - `migrate()` and `reindex()` are maintenance operations on the store and are not audited. Don't expose resource data through them.
-- New data operations (`_include`, chained search, new HTTP adapters) must go through the same scope, policy and audit path. An `_include`d or chained resource is a read of that resource and needs its own check.
+- New data operations (new HTTP adapters, `_has`, deeper chains) must go through the same scope, policy and audit path.
+- Chains and includes (`core/src/search/links.ts`, `store.ts` search): a chained parameter is resolved by a search on the target type through `ops.search` (policy filter, read check, audit), never by a SQL join across resource types: a join would let callers test facts about resources they can't read. An `_include`d resource goes through `ops.read`, a `_revinclude` through `ops.search`; denied or missing targets are left out silently. Policy filters can't contain chains or includes. Keep the result explicit when a limit cuts includes off (`includeLimitReached`), and a 400 (never a partial result) when a chain matches too much.
 
 ### 8. Test data and fixtures
 

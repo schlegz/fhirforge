@@ -38,6 +38,13 @@ export async function bundles(): Promise<void> {
   await fhir.delete('Patient', '1', { ifMatch: 'W/"2"' });
 }
 
+export async function includes(): Promise<void> {
+  const page = await fhir.search('Observation', { _include: 'Observation:subject' });
+  expectTypeOf(page.resources).toEqualTypeOf<Stored<Observation>[]>();
+  // Included resources can be any configured type.
+  expectTypeOf(page.included).toEqualTypeOf<(Stored<Patient> | Stored<Observation>)[] | undefined>();
+}
+
 export async function typed(): Promise<void> {
   // read() returns the version package's type for that resource.
   expectTypeOf(await fhir.read('Patient', '1')).toEqualTypeOf<Stored<Patient>>();

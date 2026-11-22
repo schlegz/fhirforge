@@ -1,6 +1,7 @@
 import type { AccessOptions, StoreAuditEvent, AuditOutcome, AuthorizeRequest, StoreAction } from './access.js';
 import { FhirError } from './errors.js';
-import { extractIndexRows, type SearchPolicy } from './search/index-rows.js';
+import { extractIndexRows, indexParameter, type SearchPolicy } from './search/index-rows.js';
+import { isChainKey, isIncludeKey, MAX_CHAIN_MATCHES, MAX_INCLUDED, splitLinks } from './search/links.js';
 import { parseSearch, type SearchParams } from './search/query.js';
 import type { SearchParamType } from './search/types.js';
 import {
@@ -88,7 +89,10 @@ export interface FhirDataOperations<M> {
    * Repeated parameters (arrays) are ANDed; comma-separated values are ORed.
    * Unknown parameters and malformed values throw 400.
    */
-  search<RT extends keyof M & string>(resourceType: RT, params?: SearchParams): Promise<SearchResult<Stored<M[RT]>>>;
+  search<RT extends keyof M & string>(
+    resourceType: RT,
+    params?: SearchParams,
+  ): Promise<SearchResult<Stored<M[RT]>, Stored<M[keyof M & string]>>>;
 
   /**
    * Runs a `transaction` Bundle: every write commits together or none does.
@@ -124,7 +128,9 @@ export interface FhirStore<M, Ctx = unknown> extends FhirDataOperations<M> {
    * The search parameters a resource type supports in this store: compiled ones,
    * minus those with search policy `none`. For capability statements (`/metadata`).
    */
-  searchParameters<RT extends keyof M & string>(resourceType: RT): readonly { code: string; type: SearchParamType }[];
+  searchParameters<RT extends keyof M & string>(
+    resourceType: RT,
+  ): readonly { code: string; type: SearchParamType; /** Reference parameters: the types they may point to (omitted = any). */ targets?: readonly string[] }[];
 
   /** Creates or upgrades storage for the configured resource types. Safe to run on every startup. */
   migrate(): Promise<MigrationResult>;
@@ -529,7 +535,28 @@ export function createFhirStore<
         const decision = await decide(scope, { action: 'search', resourceType, params });
         if (!decision.allowed) throw forbidden('search', resourceType);
 
-        const query = parseSearch(resourceType, mergeFilter(params, decision.filter), table, policy);
+        // Chains and includes are split off; the rest (plus the policy's filter) is a plain search.
+        const linked = splitLinks(resourceType, params, table, allowed, policy);
+        const merged: Record<string, SearchParams[string]> = { ...mergeFilter(linked.params, decision.filter) };
+
+        // Each chained value runs as its own search on the target type, through the policy and
+        // audit like any search, so a chain only matches resources this caller may see. Its matches
+        // then become an ordinary reference filter (ANDed with the rest).
+        for (const chain of linked.chains) {
+          const inner = await ops.search(chain.targetType, { [chain.innerKey]: chain.value, _count: MAX_CHAIN_MATCHES + 1 });
+          if (inner.resources.length > MAX_CHAIN_MATCHES || inner.next) {
+            throw FhirError.invalid(`Chained ${chain.param} matches more than ${MAX_CHAIN_MATCHES} ${chain.targetType} resources; narrow it`);
+          }
+          if (inner.resources.length === 0) {
+            const empty: SearchResult<never, never> = { resources: [], total: 0, ...(linked.includes.length || linked.revIncludes.length ? { included: [] } : {}) };
+            return { result: empty, ids: [] };
+          }
+          const refs = inner.resources.map((r) => `${chain.targetType}/${r.id}`).join(',');
+          const mine = merged[chain.param];
+          merged[chain.param] = mine === undefined ? refs : [...(Array.isArray(mine) ? mine : [mine]).map(String), refs];
+        }
+
+        const query = parseSearch(resourceType, merged, table, policy);
         const { versions, total } = await storage.search(query);
 
         // Defense in depth: every result must also pass a read check. If any is removed, the
@@ -542,10 +569,68 @@ export function createFhirStore<
         }
         const filtered = resources.length !== versions.length;
         const nextOffset = query.offset + query.count;
-        const result: SearchResult<never> = {
+
+        // _include / _revinclude: every included resource is a read (or search) of its own, through
+        // the policy and audit. A denied or missing target is left out, never revealed.
+        const wantsIncludes = linked.includes.length > 0 || linked.revIncludes.length > 0;
+        const included: AnyResource[] = [];
+        let limited = false;
+        const seen = new Set(resources.map((r) => `${r.resourceType}/${r.id}`));
+        const add = (r: AnyResource) => {
+          const key = `${r.resourceType}/${r.id}`;
+          if (seen.has(key)) return;
+          if (included.length >= MAX_INCLUDED) {
+            limited = true;
+            return;
+          }
+          seen.add(key);
+          included.push(r);
+        };
+        for (const inc of linked.includes) {
+          const targets = new Map<string, [string, string]>();
+          for (const r of resources) {
+            for (const row of indexParameter(r, inc.param)) {
+              if (row.kind !== 'reference' || !row.targetType || !row.targetId) continue;
+              if (!allowed.has(row.targetType) || (inc.targetType && row.targetType !== inc.targetType)) continue;
+              if (!ID_PATTERN.test(row.targetId)) continue;
+              const key = `${row.targetType}/${row.targetId}`;
+              if (!seen.has(key)) targets.set(key, [row.targetType, row.targetId]);
+            }
+          }
+          for (const [type, id] of targets.values()) {
+            if (included.length >= MAX_INCLUDED) {
+              limited = true;
+              break;
+            }
+            try {
+              add(await ops.read(type, id));
+            } catch (err) {
+              if (!(err instanceof FhirError)) throw err; // denied, missing or deleted: left out
+            }
+          }
+        }
+        for (const rev of linked.revIncludes) {
+          const refs = resources.map((r) => `${resourceType}/${r.id}`);
+          for (let i = 0; i < refs.length; i += 100) {
+            if (included.length >= MAX_INCLUDED) {
+              limited = true;
+              break;
+            }
+            const page = await ops.search(rev.resourceType, {
+              [rev.param]: refs.slice(i, i + 100).join(','),
+              _count: MAX_INCLUDED - included.length + 1,
+            });
+            for (const r of page.resources) add(r);
+            if (page.next) limited = true;
+          }
+        }
+
+        const result: SearchResult<never, never> = {
           resources: resources as never[],
           ...(filtered ? {} : { total }),
           ...(nextOffset < total ? { next: { ...params, _offset: nextOffset } } : {}),
+          ...(wantsIncludes ? { included: included as never[] } : {}),
+          ...(limited ? { includeLimitReached: true } : {}),
         };
         return { result, ids: resources.map((r) => r.id!) };
       });
@@ -835,7 +920,7 @@ export function createFhirStore<
       checkType(resourceType);
       return (table?.[resourceType] ?? [])
         .filter((p) => policy(resourceType, p.code) !== 'none')
-        .map((p) => ({ code: p.code, type: p.type }));
+        .map((p) => ({ code: p.code, type: p.type, ...(p.targets ? { targets: p.targets } : {}) }));
     },
     async migrate() {
       const { applied, reindex: needsReindex } = await storage.migrate(resourceTypes, { audit: auditTable });
@@ -857,6 +942,7 @@ function mergeFilter(params: SearchParams, filter: SearchParams | undefined): Se
   for (const [key, value] of Object.entries(filter)) {
     if (value === undefined) continue;
     if (RESULT_PARAMS.has(key)) throw new Error(`authorize: a search filter can't set ${key}`);
+    if (isChainKey(key) || isIncludeKey(key)) throw new Error('authorize: a search filter can\'t use chains or _include / _revinclude');
     const mine = merged[key];
     merged[key] =
       mine === undefined
