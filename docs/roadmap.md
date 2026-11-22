@@ -19,14 +19,19 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ## Next, in order
 
-### 1. Search: chaining and `_include` / `_revinclude`
+### 1. Built-in audit table (proposed: before search chaining)
+
+An an append-only `fhir._audit` table (insert-only for the runtime role) as a ready-made `onAudit` sink, written in the same transaction as writes.
+
+Design draft for review: [design/audit-table.md](design/audit-table.md). It closes the open decision "Audit failures on writes", which Bundles and the REST handler made bigger.
+
+### 2. Search: chaining and `_include` / `_revinclude`
 
 - `subject:Patient.name=doe`, `_include=Observation:subject`, `_revinclude=Observation:patient`.
 - Each included or chained resource is a read and goes through `authorize` (CLAUDE.md §7); limits on chain depth and include count.
 
 ## Later
 
-- **Built-in audit table:** an append-only `fhir._audit` table (insert-only for the runtime role) as a ready-made `onAudit` sink, written in the same transaction as writes.
 - **Expunge:** remove every version, index row and derived copy of a resource in one transaction (CLAUDE.md §6).
 - **Blind indexes:** the `blind` search policy (HMAC with an app-supplied key, exact match only).
 - **Field-level encryption:** `encryptor` hook, envelope encryption, key ID per row (CLAUDE.md §5).
