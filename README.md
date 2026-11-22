@@ -79,7 +79,7 @@ await fhir.asSystem('nightly export').search('Patient', {}); // bypasses the pol
 await fhir.read('Patient', id); // 403: no caller context
 ```
 
-- Only `true` allows. `false`, `undefined`, any other value or a thrown error denies.
+- Only `true` allows. `false`, `undefined`, any other value or a thrown error denies. Pass `onPolicyError: (error, request) => …` to find out when your policy throws (the request is still denied); the request can contain resource content, so treat it as PHI if you log it.
 - The policy sees the content an action touches: the new resource for `create`, the stored one for `read`, `vread`, `history` and `delete`, and both the stored and the new version for `update`. The write then runs against exactly the version the policy approved, so a concurrent change fails with 412 instead of slipping through.
 - A denied read, update or delete returns 404, the same as a missing resource, so callers can't probe for what exists. A denied `create` or `search` returns 403.
 - For `search`, return `{ filter: { … } }` to restrict the query; totals and paging stay exact. Results are also checked one by one, and if any is removed the result's `total` is omitted.

@@ -235,7 +235,7 @@ How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these propert
 
 - `authorize` is required at `createFhirStore`: a policy function or the literal `'allow-all'`. Never add an implicit default.
 - With a policy, data operations go through `store.as(ctx)`. Calling them on the store directly throws 403. `store.asSystem(reason)` bypasses the policy, needs a non-empty reason and is audited as `system: true`. Don't add other bypasses.
-- Only `true` (or, for `search`, `{ filter }`) allows. Anything else, including a thrown error, denies.
+- Only `true` (or, for `search`, `{ filter }`) allows. Anything else, including a thrown error, denies. A thrown error is also passed to the app's `onPolicyError`, if set; the denial stands whatever the hook does (its own errors are ignored). Never turn a policy error into an allow or a different status.
 - The policy sees the content: the new resource for `create`; the stored resource for `read`, `vread`, `history` and `delete`; both stored and new for `update`. Check after loading, before returning or writing.
 - Denied `read`, `vread`, `history`, `update` (of a stored resource) and `delete` throw the same 404 as a missing resource. Denied `create`, `search`, and update with denied new content throw 403. Don't leak existence in error messages.
 - Writes after a policy check are pinned: `update` passes `ifMatch` (the approved version) or `ifNoneExist`, and `delete` passes `ifMatch`, so a concurrent change fails with 412. Every write path builds its write with `planCreate` / `planUpdate` / `planDelete` in `store.ts` (Bundles do too); a new one (patch) must as well.

@@ -52,7 +52,7 @@ Learned from the 0.2.0 release (run 45072636883, four attempts):
 
 ## Open decisions
 
-- **Policy errors:** an `authorize` function that throws is treated as a denial and isn't reported anywhere. Safe, but it hides policy bugs. Consider an `onPolicyError` hook or reporting it in the audit event (without the error message, which could contain PHI).
+- **Policy errors (decided 2026-11-22):** a throwing `authorize` still denies, and the error now goes to an optional `onPolicyError(error, request)` hook so policy bugs get noticed. Audit events aren't flagged: that would need per-operation state through every check, and the hook already reaches the app.
 - **Validation strictness (decided 2026-11-22):** validation is always on, with no opt-out; an opt-out can be added later without a breaking change, removing one can't. Extensions are open: any `url` is accepted, but each must be a well-formed Extension. Stored data isn't re-validated on read. Revisit if apps need to import legacy data that doesn't conform (an `asSystem` import mode would be the place, audited).
 - **Denied `create` / `search`** return 403 while denied reads return 404. Revisit if some apps need 404 everywhere.
 - **Audit failures on writes (resolved 2026-11-22 for the audit table):** with `audit: { table: true }`, a write and its audit row commit together. Without it, `onAudit` still runs after the commit, as before. Revisit making the table required (like `authorize`) before 1.0.
