@@ -8,7 +8,7 @@
     "node": ">=26"
   },
   "scripts": {
-    "build": "tsc -b packages/definitions packages/codegen packages/core packages/r4 packages/pg packages/pglite packages/fhirforge",
+    "build": "tsc -b packages/definitions packages/codegen packages/core packages/r4 packages/pg packages/pglite packages/http packages/fhirforge",
     "test": "pnpm build && vitest run && pnpm test:types && pnpm test:examples",
     "test:types": "tsc -p packages/r4/tsconfig.test.json && tsc -p packages/store-tests/tsconfig.json && tsc -p tsconfig.json",
     "test:examples": "tsx packages/r4/scripts/check-examples.ts",

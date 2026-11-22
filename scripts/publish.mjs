@@ -31,7 +31,8 @@ const distTag = tagIndex === -1 ? undefined : args[tagIndex + 1];
 const inCi = process.env.GITHUB_ACTIONS === 'true';
 
 // Dependency order: a package is published after everything it depends on.
-const ORDER = ['definitions', 'core', 'codegen', 'r4', 'pg', 'pglite', 'fhirforge'];
+// `http` is last: a new package's first publish can fail (no trusted publisher yet) without blocking the others.
+const ORDER = ['definitions', 'core', 'codegen', 'r4', 'pg', 'pglite', 'fhirforge', 'http'];
 const ALLOWED = [/^package\/package\.json$/, /^package\/README\.md$/, /^package\/LICENSE$/, /^package\/dist\//];
 
 const run = (cmd, argv, opts = {}) => execFileSync(cmd, argv, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'], ...opts });

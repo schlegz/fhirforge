@@ -2,10 +2,25 @@
 // ts-expect-error directive must fail to compile, or the build fails.
 import { createFhirStore, type BundleResponse, type FhirStorage, type Stored } from '@fhirforge/core';
 import { r4, type Bundle, type Observation, type Patient } from '@fhirforge/r4';
+import { createFhirHandler, type FhirHandler } from '@fhirforge/http';
 import { expectTypeOf } from 'expect-type';
 
 declare const storage: FhirStorage;
 const fhir = createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient', 'Observation'] });
+
+export function httpHandler(): void {
+  interface Session {
+    userId: string;
+  }
+  const guarded = createFhirStore({ storage, fhir: r4, resources: ['Patient'], authorize: (_req: { ctx: Session }) => true });
+  const handler = createFhirHandler({ store: guarded, basePath: '/fhir', context: (): Session | undefined => ({ userId: 'u1' }) });
+  expectTypeOf(handler).toEqualTypeOf<FhirHandler>();
+  // Next.js route handlers are (request, context) => Response: the handler fits.
+  const GET: (request: Request, context: { params: Promise<{ path?: string[] }> }) => Promise<Response> = handler;
+  void GET;
+  // @ts-expect-error the context must match the store's Ctx
+  createFhirHandler({ store: guarded, basePath: '/fhir', context: () => ({ role: 'x' }) });
+}
 
 export async function bundles(): Promise<void> {
   // An R4 Bundle is accepted as is; the result is a response Bundle.
