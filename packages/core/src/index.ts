@@ -48,4 +48,5 @@ export {
 export type { ElementRule, PrimitiveKind, ValidationTable } from './validation/types.js';
 export { createValidator, MAX_DEPTH, MAX_ISSUES, type ValidationIssue, type Validator } from './validation/validate.js';
 export { checkPrimitive, MAX_STRING_LENGTH } from './validation/primitives.js';
+export { MAX_CHAINS, MAX_CHAIN_MATCHES, MAX_INCLUDE_PARAMS, MAX_INCLUDED } from './search/links.js';
 export { normalizeString, dateRange, numberRange, parseReference } from './search/values.js';

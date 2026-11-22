@@ -276,11 +276,29 @@ async function search(ops: FhirDataOperations<Record<string, AnyResource>>, base
       { relation: 'self', url: `${base}/${type}${query(params)}` },
       ...(page.next ? [{ relation: 'next', url: `${base}/${type}${query(page.next)}` }] : []),
     ],
-    entry: page.resources.map((resource) => ({
-      fullUrl: `${base}/${type}/${resource.id}`,
-      resource,
-      search: { mode: 'match' },
-    })),
+    entry: [
+      ...page.resources.map((resource) => ({
+        fullUrl: `${base}/${type}/${resource.id}`,
+        resource,
+        search: { mode: 'match' },
+      })),
+      ...(page.included ?? []).map((resource) => ({
+        fullUrl: `${base}/${resource.resourceType}/${resource.id}`,
+        resource,
+        search: { mode: 'include' },
+      })),
+      ...(page.includeLimitReached
+        ? [
+            {
+              resource: {
+                resourceType: 'OperationOutcome',
+                issue: [{ severity: 'warning', code: 'too-costly', diagnostics: 'Some included resources were left out (include limit)' }],
+              },
+              search: { mode: 'outcome' },
+            },
+          ]
+        : []),
+    ],
   };
 }
 
@@ -338,6 +356,13 @@ function capabilityStatement(store: FhirStore<Record<string, AnyResource>, unkno
           conditionalUpdate: false,
           conditionalDelete: 'not-supported',
           searchParam: store.searchParameters(type).map((p) => ({ name: p.code, type: p.type })),
+          searchInclude: store.searchParameters(type).filter((p) => p.type === 'reference').map((p) => `${type}:${p.code}`),
+          searchRevInclude: store.resourceTypes.flatMap((other) =>
+            store
+              .searchParameters(other)
+              .filter((p) => p.type === 'reference' && (!p.targets || p.targets.includes(type)))
+              .map((p) => `${other}:${p.code}`),
+          ),
         })),
         interaction: [{ code: 'transaction' }, { code: 'batch' }],
       },

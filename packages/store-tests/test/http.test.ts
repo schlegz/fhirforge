@@ -119,6 +119,23 @@ describe.each(backends)('HTTP handler on $name', (backend) => {
     expect(JSON.stringify(bad.json)).not.toContain('Synthetic');
   });
 
+  it('returns _include results as include entries, and advertises includes in /metadata', async () => {
+    const p = await send('POST', '/fhir/Patient', { body: { resourceType: 'Patient', name: [{ family: 'Doe' }] } });
+    await send('POST', '/fhir/Observation', {
+      body: { resourceType: 'Observation', status: 'final', code: { text: 'hr' }, subject: { reference: `Patient/${p.json!.id}` } },
+    });
+    const res = await send('GET', '/fhir/Observation?subject.name=doe&_include=Observation:subject');
+    expect(res.json!.entry.map((e: any) => [e.resource.resourceType, e.search.mode])).toEqual([
+      ['Observation', 'match'],
+      ['Patient', 'include'],
+    ]);
+    expect(res.json!.entry[1].fullUrl).toBe(`${ORIGIN}/fhir/Patient/${p.json!.id}`);
+    const meta = await send('GET', '/fhir/metadata', { auth: false });
+    const patient = meta.json!.rest[0].resource.find((r: any) => r.type === 'Patient');
+    expect(patient.searchRevInclude).toContain('Observation:subject');
+    expect(patient.searchRevInclude).not.toContain('Observation:specimen'); // can't point to a Patient
+  });
+
   it('runs transaction and batch Bundles posted to the base URL', async () => {
     const res = await send('POST', '/fhir', {
       body: {

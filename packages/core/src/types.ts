@@ -50,8 +50,15 @@ export interface MigrationResult {
 }
 
 /** One page of search results. */
-export interface SearchResult<T> {
+export interface SearchResult<T, I = unknown> {
   resources: T[];
+  /**
+   * With `_include` / `_revinclude`: the referenced or referencing resources the caller may
+   * read (each checked and audited as its own read or search), without duplicates.
+   */
+  included?: I[];
+  /** True when more resources would have been included than the limit (`MAX_INCLUDED`) allows. */
+  includeLimitReached?: boolean;
   /**
    * Number of matches across all pages. Omitted when the access policy removed
    * results after the query ran (it would count resources the caller can't see).

@@ -2,7 +2,7 @@
 
 Embeddable FHIR storage for Node and TypeScript. Add it to any app to store, search and manage FHIR resources in your own Postgres database. It's a library, not a server: your app keeps control of the connection, transactions, auth and HTTP.
 
-> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, transaction and batch Bundles, access control, an append-only audit table, and a FHIR REST API for Next.js, Express and other frameworks (`@fhirforge/http`). Chained search and `_include` are next.
+> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite, with runtime validation, transaction and batch Bundles, access control, an append-only audit table, and a FHIR REST API for Next.js, Express and other frameworks (`@fhirforge/http`), including chained search and `_include` / `_revinclude`.
 
 ## Quick start
 
@@ -149,7 +149,7 @@ export { handler as GET, handler as POST, handler as PUT, handler as DELETE };
 In Express: `app.use('/fhir', toNodeHandler(createFhirHandler({ store, basePath: '/fhir', baseUrl, context })))`. Mount it before body parsers so it reads the body with its own size limit (if a parser already ran, the parsed `req.body` is used). Set `baseUrl`: without it, links are built from the client-supplied `Host` header.
 
 - Every request runs as `store.as(ctx)`: the same validation, `authorize` policy and `onAudit` as calls in code. Without a context it gets 401 and never reaches the store. `GET /metadata` (a CapabilityStatement built from the configured types and searchable parameters) is public.
-- Routes: `POST /` for transaction and batch Bundles; `GET /Type?…` and `POST /Type/_search` for search (`searchset` Bundles with absolute `fullUrl`s and `self` / `next` links); `POST /Type`; `GET`, `PUT` and `DELETE /Type/id`; `GET /Type/id/_history` and `/_history/v`. `If-Match` maps to `ifMatch`; responses carry `ETag`, `Last-Modified` and, on create, `Location`.
+- Routes: `POST /` for transaction and batch Bundles; `GET /Type?…` and `POST /Type/_search` for search (`searchset` Bundles with absolute `fullUrl`s, `self` / `next` links, and `_include`d resources as `search.mode: 'include'` entries); `POST /Type`; `GET`, `PUT` and `DELETE /Type/id`; `GET /Type/id/_history` and `/_history/v`. `If-Match` maps to `ifMatch`; responses carry `ETag`, `Last-Modified` and, on create, `Location`.
 - Responses are `application/fhir+json` with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Errors are OperationOutcomes; unexpected errors become a generic 500 (pass `onError` to see them). Bodies over `maxBodyBytes` (default 10 MB) get 413.
 - Not handled: XML (`_format=xml` gets 406), `PATCH`, conditional operations, system- and type-level history, CORS and rate limiting (your app's job). Re-creating a deleted resource with `PUT` returns 200, not 201.
 
@@ -169,7 +169,21 @@ In Express: `app.use('/fhir', toNodeHandler(createFhirHandler({ store, basePath:
 
 Results: `_count` (default 20, max 1000), `_offset`, `_sort` (`_sort=-birthdate,family`; date, string, token, number, quantity, uri, `_id`, `_lastUpdated`). Handling is strict: an unknown parameter, unsupported modifier or malformed value is a 400 error rather than being ignored, so a typo never widens a search.
 
-Not supported yet: composite and special parameters, chaining (`subject.name=`), `_include` / `_revinclude`, `_has`, the `ap` prefix, `:text`, `:above` / `:below`, `_total` options, and a few expressions outside the compiled FHIRPath subset. `unsupportedSearchParameters` from `@fhirforge/r4` lists each with the reason.
+**Chaining and includes.**
+
+```ts
+await fhir.as(session).search('Observation', { 'subject.name': 'doe', code: '8867-4' }); // Observations of patients named Doe
+await fhir.as(session).search('Observation', { 'performer:Practitioner.name': 'xavier' }); // the type is needed when there are several
+const page = await fhir.as(session).search('Observation', { code: '8867-4', _include: 'Observation:subject' });
+page.included; // the referenced Patients the caller may read
+await fhir.as(session).search('Patient', { family: 'doe', _revinclude: 'Observation:subject' }); // plus their Observations
+```
+
+- A chain runs as its own search on the target type, through `authorize` and `onAudit` like any search, and its matches become a reference filter. It only matches resources the caller may see. One level, at most 3 chained values per search, and a chain may match at most 100 targets (more is a 400: narrow it).
+- Each `_include`d resource is a `read` and each `_revinclude` a `search`, each checked by the policy and audited on its own. Resources the caller may not read are left out silently. At most 5 `_include` / `_revinclude` values and 100 included resources per page; `includeLimitReached` says when some were left out. Not supported: `:iterate` and `*`.
+- A policy's search `filter` can't contain chains or includes.
+
+Not supported yet: composite and special parameters, chains deeper than one level, `_include:iterate`, `_has`, the `ap` prefix, `:text`, `:above` / `:below`, `_total` options, and a few expressions outside the compiled FHIRPath subset. `unsupportedSearchParameters` from `@fhirforge/r4` lists each with the reason.
 
 **Search policy.** Index rows are readable copies of resource data, so each parameter can be configured:
 
