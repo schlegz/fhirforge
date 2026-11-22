@@ -1,0 +1,22 @@
+{
+  "name": "@fhirforge/codegen",
+  "version": "0.0.1",
+  "description": "Generates strict TypeScript types for a FHIR version from its official definitions. Build-time only.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "fhirforge-codegen": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "@fhirforge/definitions": "workspace:*"
+  }
+}

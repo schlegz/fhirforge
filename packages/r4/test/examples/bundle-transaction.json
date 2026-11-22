@@ -1,0 +1,23 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:61ebe359-bfdc-4613-8bf2-c5e300945f0a",
+      "resource": { "resourceType": "Patient", "name": [{ "family": "Doe", "given": ["Jane"] }], "gender": "female" },
+      "request": { "method": "POST", "url": "Patient" }
+    },
+    {
+      "resource": {
+        "resourceType": "MedicationRequest",
+        "status": "active",
+        "intent": "order",
+        "medicationCodeableConcept": { "coding": [{ "system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "860975" }] },
+        "subject": { "reference": "urn:uuid:61ebe359-bfdc-4613-8bf2-c5e300945f0a" },
+        "authoredOn": "2026-11-22",
+        "dosageInstruction": [{ "text": "Take 1 tablet by mouth daily", "timing": { "repeat": { "frequency": 1, "period": 1, "periodUnit": "d" } } }]
+      },
+      "request": { "method": "POST", "url": "MedicationRequest" }
+    }
+  ]
+}
