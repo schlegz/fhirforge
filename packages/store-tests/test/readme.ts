@@ -17,4 +17,11 @@ export async function quickStart(): Promise<void> {
   await fhir.update({ ...same, active: true }, { ifMatch: same.meta.versionId });
   await fhir.delete('Patient', patient.id);
   await fhir.history('Patient', patient.id);
+
+  const page = await fhir.search('Patient', { family: 'doe', birthdate: 'ge1970', _sort: '-birthdate', _count: 20 });
+  void page.resources;
+}
+
+export function searchPolicy(storage: Parameters<typeof createFhirStore>[0]['storage']): void {
+  createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'none' } } });
 }

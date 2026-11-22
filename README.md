@@ -2,7 +2,7 @@
 
 Embeddable FHIR storage for Node and TypeScript. Add it to any app to store, search and manage FHIR resources in your own Postgres database. It's a library, not a server: your app keeps control of the connection, transactions, auth and HTTP.
 
-> **Status:** early development. Typed create, read, update, delete and history work on Postgres and PGlite. Search, transactions (Bundles), auth hooks and HTTP adapters are next.
+> **Status:** early development. Typed create, read, update, delete, history and FHIR search work on Postgres and PGlite. Transactions (Bundles), auth and audit hooks, and HTTP adapters are next.
 
 ## Quick start
 
@@ -24,9 +24,40 @@ const same = await fhir.read('Patient', patient.id); // typed as R4 Patient
 await fhir.update({ ...same, active: true }, { ifMatch: same.meta.versionId }); // 412 if someone else updated it
 await fhir.delete('Patient', patient.id); // read now throws 410; history is kept
 const versions = await fhir.history('Patient', patient.id); // newest first
+
+const page = await fhir.search('Patient', { family: 'doe', birthdate: 'ge1970', _sort: '-birthdate', _count: 20 });
+page.resources; // Stored<Patient>[]; page.total counts all matches; page.next has the next page's params
 ```
 
 Errors are `FhirError`s with an HTTP `status` and a FHIR `outcome` (OperationOutcome): 400 invalid or unsupported, 404 not found, 410 deleted, 412 version conflict.
+
+Ids are server-assigned UUIDs. `update` also accepts a client-chosen id (update-as-create), but don't use real-world identifiers such as MRNs as ids: ids appear in references, URLs and error messages, so they shouldn't be PHI. Put identifiers in `identifier`.
+
+### Search
+
+`search(resourceType, params)` takes FHIR search parameters as an object. Arrays are ANDed (`birthdate: ['ge1970', 'lt1980']`) and comma-separated values are ORed (`gender: 'male,female'`). Parameters come from the official SearchParameter definitions, compiled at build time.
+
+| Type | Examples | Supported |
+| --- | --- | --- |
+| string | `family=doe`, `name:exact=Doe`, `address-city:contains=creek` | Prefix match (default), ignoring case and accents; `:exact`, `:contains` |
+| token | `gender=female`, `identifier=urn:mrn\|A100`, `identifier=\|A100`, `code=http://loinc.org\|` | `code`, `system\|code`, `\|code`, `system\|`; `:not` |
+| date | `birthdate=1974`, `date=ge2026-11-01`, `_lastUpdated=gt2026-11-20T10:00:00Z` | Precision ranges; `eq ne gt lt ge le sa eb`; periods, open-ended periods, choice types |
+| reference | `subject=Patient/123`, `patient=123`, `subject:Group=7` | `Type/id`, bare id, absolute URL, `urn:uuid:`, `:Type` |
+| quantity | `value-quantity=gt80\|http://unitsofmeasure.org\|kg` | Prefixes, precision ranges, system and code |
+| number, uri | `_profile=http://…` | Prefixes for number; exact match for uri |
+| any | `birthdate:missing=true`, `_id=a,b` | `:missing`, `_id`, `_lastUpdated` |
+
+Results: `_count` (default 20, max 1000), `_offset`, `_sort` (`_sort=-birthdate,family`; date, string, token, number, quantity, uri, `_id`, `_lastUpdated`). Handling is strict: an unknown parameter, unsupported modifier or malformed value is a 400 error rather than being ignored, so a typo never widens a search.
+
+Not supported yet: composite and special parameters, chaining (`subject.name=`), `_include` / `_revinclude`, `_has`, the `ap` prefix, `:text`, `:above` / `:below`, `_total` options, and a few expressions outside the compiled FHIRPath subset. `unsupportedSearchParameters` from `@fhirforge/r4` lists each with the reason.
+
+**Search policy.** Index rows are readable copies of resource data, so each parameter can be configured:
+
+```ts
+createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'none' } } });
+```
+
+`plaintext` (default) indexes the value for full search. `none` doesn't index it and makes it unsearchable. `blind` (keyed-hash, exact match only) is planned. After changing the policy, run `await fhir.reindex()`.
 
 ### Storage layout
 
@@ -34,7 +65,10 @@ Everything lives in its own schema (`fhir` by default, configurable), never mixe
 
 - `fhir."Patient"`: the current version of each resource as JSONB
 - `fhir."Patient_history"`: every version, including delete markers
+- `fhir."Patient_string"`, `_token`, `_date`, `_reference`, `_number`, `_quantity`, `_uri`: search index rows, replaced in the same transaction as each write, removed with the resource
 - `fhir."_migrations"`: applied migration ids
+
+The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on these tables, plus `DELETE` on the index tables (index rows are replaced on every write). Only `migrate()` needs DDL rights. When a migration adds index tables, `migrate()` indexes existing resources automatically.
 
 `migrate()` takes a Postgres advisory lock, so several instances starting at once are safe. To run migrations with your own tool instead, `migrationSql(['Patient', 'Observation'])` from `@fhirforge/pg` returns the same schema as plain, idempotent SQL.
 
@@ -43,14 +77,14 @@ Everything lives in its own schema (`fhir` by default, configurable), never mixe
 | Package | What it is |
 | --- | --- |
 | `@fhirforge/definitions` | Build-time. Loads official FHIR packages (e.g. `hl7.fhir.r4.core@4.0.1`) from packages.fhir.org into the standard `~/.fhir/packages` cache, indexes StructureDefinitions, ValueSets, CodeSystems and SearchParameters, and builds element trees. |
-| `@fhirforge/codegen` | Build-time. Generates strict TypeScript types for a FHIR version (`fhirforge-codegen` CLI). |
-| `@fhirforge/r4` | Generated FHIR R4 types: 146 resources, 41 datatypes, 20 primitives, `ResourceTypeMap`. Safe to import in frontend code. |
+| `@fhirforge/codegen` | Build-time. Generates strict TypeScript types for a FHIR version and compiles its search parameters' FHIRPath expressions into plain path data (`fhirforge-codegen` CLI). |
+| `@fhirforge/r4` | Generated FHIR R4 types (146 resources, 41 datatypes, 20 primitives, `ResourceTypeMap`) and compiled search parameters. Use `import type` in frontend code so the search data isn't bundled. |
 | `@fhirforge/core` | `createFhirStore`: version-neutral, typed from the version package you pass in. No I/O of its own. |
-| `@fhirforge/pg` | Postgres storage: takes a `pg` Pool (or any `Database`), with migrations and optimistic locking. |
+| `@fhirforge/pg` | Postgres storage: takes a `pg` Pool (or any `Database`), with migrations, optimistic locking, search indexes and TLS enforcement. |
 | `@fhirforge/pglite` | In-process [PGlite](https://pglite.dev) storage: real Postgres with no server, for tests and local development. |
 | `fhirforge` | One install for the common setup: re-exports `core`, `pg` and `r4`. |
 
-Planned: search, Bundle transactions, `authorize` / `onAudit` hooks, `@fhirforge/next`, `@fhirforge/express`.
+Planned: Bundle transactions, `authorize` / `onAudit` hooks, chained search and `_include`, `@fhirforge/next`, `@fhirforge/express`.
 
 ## Why the types are stricter than usual
 
@@ -75,12 +109,14 @@ const p: Patient = {
 
 fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SOC 2 compliant on its own. What it does today:
 
-- All SQL uses bind parameters; table and schema names are allow-listed.
+- All SQL uses bind parameters, including every search value; table and schema names are allow-listed, and LIKE wildcards in search values are escaped.
 - Tables live in their own schema, and the runtime store never changes the schema (only `migrate()` does), so it can run under a role with data-only privileges.
-- Writes are atomic and race-free: each update or delete locks the row and writes the current version and its history in one transaction.
-- Errors (`FhirError`) report the resource type, id and version, never field values. The library doesn't log resource content.
+- Writes are atomic and race-free: each update or delete locks the row and writes the current version, its history and its search index rows in one transaction.
+- `postgresStorage(pool)` refuses a non-TLS connection to a non-local host (`ssl`, or `sslmode=require` / `verify-ca` / `verify-full`). `{ allowInsecure: true }` overrides it for development only. A custom `Database` is your responsibility.
+- Errors (`FhirError`) name the resource type, id, version or search parameter, never field or search values. The library doesn't log resource content.
+- Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 
-What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), TLS to the database, access control and audit logging. Planned in fhirforge: TLS enforcement, `authorize` and `onAudit` hooks, field-level encryption, per-parameter search index policies and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
+What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), access control and audit logging. Planned in fhirforge: `authorize` and `onAudit` hooks, field-level encryption, blind (keyed-hash) search indexes and expunge. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
 
 ## Development
 

@@ -6,6 +6,7 @@ import {
   type StructureDefinition,
 } from '@fhirforge/definitions';
 import { TsModule } from './module.js';
+import { compileSearchParameters, renderSearchModule } from './search.js';
 import {
   capitalize,
   jsDoc,
@@ -25,6 +26,9 @@ export interface GeneratedFiles {
   /** Relative path (e.g. `resources/Patient.ts`) → file contents. */
   files: Map<string, string>;
   resourceTypes: string[];
+  /** Compiled (resource, search parameter) pairs, and how many could not be compiled. */
+  searchParameterCount: number;
+  unsupportedSearchParameterCount: number;
   complexTypes: string[];
   primitiveTypes: string[];
 }
@@ -131,6 +135,10 @@ export function generateTypes(defs: DefinitionSet, options: GenerateOptions = {}
   );
   files.set(`${M.resourceMap}.ts`, map.render(header));
 
+  // ---- search parameters (runtime data, not types) ----
+  const search = compileSearchParameters(defs);
+  files.set('search-parameters.ts', renderSearchModule(search, header));
+
   // ---- index ----
   const index = new TsModule('index');
   for (const m of [M.primitives, M.helpers, M.datatypes, M.resourceMap, ...resources.map((sd) => M.resource(sd.type))]) {
@@ -140,6 +148,8 @@ export function generateTypes(defs: DefinitionSet, options: GenerateOptions = {}
 
   return {
     files,
+    searchParameterCount: Object.values(search.table).reduce((n, params) => n + params.length, 0),
+    unsupportedSearchParameterCount: Object.values(search.unsupported).reduce((n, list) => n + list.length, 0),
     resourceTypes: resources.map((sd) => sd.type),
     complexTypes: complex.map((sd) => sd.type),
     primitiveTypes: primitives.map((sd) => sd.type),

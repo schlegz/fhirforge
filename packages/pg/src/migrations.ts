@@ -1,5 +1,10 @@
 import { checkSchemaName, ident, tablesFor } from './sql.js';
 
+/** Migrations that create search index tables: existing resources must be reindexed after them. */
+export function isIndexMigration(id: string): boolean {
+  return /^resource:[A-Za-z]+:2$/.test(id);
+}
+
 export interface Migration {
   /** Stable id recorded in `<schema>._migrations`, e.g. `resource:Patient:1`. */
   id: string;
@@ -37,6 +42,26 @@ export function migrationsFor(schema: string, resourceTypes: readonly string[]):
   PRIMARY KEY (id, version_id)
 )`,
         `CREATE INDEX IF NOT EXISTS ${idx('last_updated_idx')} ON ${t.current} (last_updated)`,
+      ],
+    });
+    // Search indexes: one table per value kind. Rows are copies of resource data (may be PHI)
+    // and cascade away with the resource row, so expunge can't leave them behind.
+    const fk = `resource_id text NOT NULL REFERENCES ${t.current} (id) ON DELETE CASCADE,\n  param text NOT NULL`;
+    const table = (kind: string, columns: string, lookup: string) => [
+      `CREATE TABLE IF NOT EXISTS ${t.index[kind as keyof typeof t.index]} (\n  ${fk},\n  ${columns}\n)`,
+      `CREATE INDEX IF NOT EXISTS ${idx(`${kind}_resource_idx`)} ON ${t.index[kind as keyof typeof t.index]} (resource_id)`,
+      `CREATE INDEX IF NOT EXISTS ${idx(`${kind}_lookup_idx`)} ON ${t.index[kind as keyof typeof t.index]} (${lookup})`,
+    ];
+    migrations.push({
+      id: `resource:${resourceType}:2`,
+      statements: [
+        ...table('string', 'value_norm text NOT NULL,\n  value_exact text NOT NULL', 'param, value_norm text_pattern_ops'),
+        ...table('token', 'system text,\n  code text NOT NULL', 'param, code, system'),
+        ...table('date', 'low timestamptz,\n  high timestamptz', 'param, low, high'),
+        ...table('reference', 'target_type text,\n  target_id text,\n  reference text NOT NULL', 'param, target_id, target_type'),
+        ...table('number', 'value numeric NOT NULL', 'param, value'),
+        ...table('quantity', 'value numeric NOT NULL,\n  system text,\n  code text', 'param, value'),
+        ...table('uri', 'value text NOT NULL', 'param, value'),
       ],
     });
   }

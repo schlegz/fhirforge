@@ -1,6 +1,16 @@
 import { FhirError } from './errors.js';
-import type { FhirStorage, StoredVersion } from './storage.js';
-import type { AnyResource, FhirVersionPackage, HistoryEntry, MigrationResult, ResourceMapOf, Stored } from './types.js';
+import { extractIndexRows, type SearchPolicy } from './search/index-rows.js';
+import { parseSearch, type SearchParams } from './search/query.js';
+import type { FhirStorage, Indexer, StoredVersion } from './storage.js';
+import type {
+  AnyResource,
+  FhirVersionPackage,
+  HistoryEntry,
+  MigrationResult,
+  ResourceMapOf,
+  SearchResult,
+  Stored,
+} from './types.js';
 
 export interface CreateFhirStoreOptions<V extends FhirVersionPackage<unknown>, K extends string> {
   /** Where resources live, e.g. `pgliteStorage(new PGlite())` or `postgresStorage(pool)`. */
@@ -9,6 +19,15 @@ export interface CreateFhirStoreOptions<V extends FhirVersionPackage<unknown>, K
   fhir: V;
   /** The resource types this store manages. Only these get tables and can be written. */
   resources: readonly K[];
+  search?: {
+    /**
+     * How each search parameter is indexed, keyed `ResourceType.code`
+     * (e.g. `'Patient.birthdate'`). Default `plaintext` (full search).
+     * `none`: not indexed and not searchable. `blind` (HMAC, exact match only)
+     * is planned and rejected for now.
+     */
+    policy?: Readonly<Partial<Record<`${K}.${string}`, SearchPolicy>>>;
+  };
 }
 
 /** A resource of type RT from map M, with its `resourceType` pinned so TS can infer RT. */
@@ -45,6 +64,17 @@ export interface FhirStore<M> {
 
   /** Every version of a resource, newest first. Throws 404 if it never existed. */
   history<RT extends keyof M & string>(resourceType: RT, id: string): Promise<HistoryEntry<M[RT]>[]>;
+
+  /**
+   * FHIR search over current resources, e.g.
+   * `search('Patient', { family: 'doe', birthdate: 'ge1970', _sort: '-birthdate', _count: 10 })`.
+   * Repeated parameters (arrays) are ANDed; comma-separated values are ORed.
+   * Unknown parameters and malformed values throw 400.
+   */
+  search<RT extends keyof M & string>(resourceType: RT, params?: SearchParams): Promise<SearchResult<Stored<M[RT]>>>;
+
+  /** Rebuilds search indexes (all configured types, or one). Run after changing the search policy. */
+  reindex<RT extends keyof M & string>(resourceType?: RT): Promise<Record<string, number>>;
 }
 
 // Web Crypto is global in Node 19+, Deno, Bun and browsers. Declared here so
@@ -81,17 +111,38 @@ export function createFhirStore<
   const checkType = (resourceType: unknown): string => {
     if (typeof resourceType !== 'string' || !allowed.has(resourceType)) {
       throw FhirError.notSupported(
-        `Resource type ${String(resourceType)} is not managed by this store (configured: ${resourceTypes.join(', ')})`,
+        `Resource type ${typeof resourceType === 'string' && /^[A-Z][A-Za-z]{0,63}$/.test(resourceType) ? resourceType : '(invalid)'} is not managed by this store (configured: ${resourceTypes.join(', ')})`,
       );
     }
     return resourceType;
   };
   const checkId = (id: unknown): string => {
     if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
-      throw FhirError.invalid(`Invalid resource id: ${JSON.stringify(id)}`);
+      throw FhirError.invalid('Invalid resource id');
     }
     return id;
   };
+  const table = fhir.searchParameters;
+  const policies = new Map<string, SearchPolicy>(Object.entries(options.search?.policy ?? {}) as [string, SearchPolicy][]);
+  for (const [key, value] of policies) {
+    const [type, code] = key.split('.');
+    if (!type || !code || !allowed.has(type) || !table?.[type]?.some((p) => p.code === code)) {
+      throw new Error(`createFhirStore: search policy for unknown parameter ${key}`);
+    }
+    if (value === 'blind') throw new Error(`createFhirStore: blind indexing (${key}) is not implemented yet`);
+    if (value !== 'plaintext' && value !== 'none') throw new Error(`createFhirStore: invalid search policy ${String(value)} for ${key}`);
+  }
+  const policy = (resourceType: string, code: string): SearchPolicy => policies.get(`${resourceType}.${code}`) ?? 'plaintext';
+  const index: Indexer | undefined = table ? (resource) => extractIndexRows(resource, table, policy) : undefined;
+  const writeOptions = index ? { index } : {};
+
+  const reindex = async (types: readonly string[]): Promise<Record<string, number>> => {
+    const out: Record<string, number> = {};
+    if (!index) return out;
+    for (const t of types) out[t] = await storage.reindex(t, index);
+    return out;
+  };
+
   const current = (resourceType: string, id: string, v: StoredVersion | undefined) => {
     if (!v) throw FhirError.notFound(resourceType, id);
     if (v.deleted || !v.resource) throw FhirError.gone(resourceType, id);
@@ -102,12 +153,16 @@ export function createFhirStore<
     fhirVersion: fhir.fhirVersion,
     resourceTypes,
 
-    migrate: () => storage.migrate(resourceTypes),
+    async migrate() {
+      const { applied, reindex: needsReindex } = await storage.migrate(resourceTypes);
+      if (!needsReindex?.length) return { applied };
+      return { applied, reindexed: await reindex(needsReindex) };
+    },
 
     async create(resource) {
       checkType(resource?.resourceType);
       const { id: _ignored, ...rest } = resource;
-      const version = await storage.create({ ...rest, id: crypto.randomUUID() });
+      const version = await storage.create({ ...rest, id: crypto.randomUUID() }, writeOptions);
       return version.resource as never;
     },
 
@@ -132,7 +187,7 @@ export function createFhirStore<
       const ifMatch = normalizeVersion(updateOptions?.ifMatch);
       const { version } = await storage.update(
         resource as AnyResource & { id: string },
-        ifMatch === undefined ? {} : { ifMatch },
+        ifMatch === undefined ? writeOptions : { ...writeOptions, ifMatch },
       );
       return version.resource as never;
     },
@@ -154,6 +209,25 @@ export function createFhirStore<
         deleted: v.deleted,
         ...(v.resource ? { resource: v.resource as never } : {}),
       }));
+    },
+
+    async search(resourceType, params = {}) {
+      checkType(resourceType);
+      if (!table) throw FhirError.notSupported(`FHIR ${fhir.fhirVersion} package has no compiled search parameters`);
+      const query = parseSearch(resourceType, params, table, policy);
+      const { versions, total } = await storage.search(query);
+      const resources = versions.map((v) => v.resource as never);
+      const nextOffset = query.offset + query.count;
+      return {
+        resources,
+        total,
+        ...(nextOffset < total ? { next: { ...params, _offset: nextOffset } } : {}),
+      };
+    },
+
+    async reindex(resourceType) {
+      if (resourceType !== undefined) checkType(resourceType);
+      return reindex(resourceType ? [resourceType] : resourceTypes);
     },
   };
 

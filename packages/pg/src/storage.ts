@@ -3,14 +3,16 @@ import {
   stampMeta,
   type AnyResource,
   type FhirStorage,
-  type MigrationResult,
+  type Indexer,
   type StoredVersion,
 } from '@fhirforge/core';
 import { isDatabase, pgPoolDatabase, type Database, type PgPoolLike, type SqlClient } from './database.js';
-import { bootstrapStatements, migrationsFor } from './migrations.js';
+import { bootstrapStatements, isIndexMigration, migrationsFor } from './migrations.js';
+import { deleteIndexRows, runSearch, writeIndexRows } from './search.js';
 import { checkSchemaName, ident, tablesFor } from './sql.js';
+import { assertSecureTransport, type TransportOptions } from './transport.js';
 
-export interface PostgresStorageOptions {
+export interface PostgresStorageOptions extends TransportOptions {
   /** Postgres schema for all fhirforge tables. Default `fhir`. */
   schema?: string;
 }
@@ -26,11 +28,16 @@ interface Row {
  * FHIR storage on Postgres. Pass a `pg` Pool or any `Database`
  * (e.g. `pgliteDatabase(pglite)` from `@fhirforge/pglite`).
  *
+ * A Pool pointing at a non-local host must be configured for TLS, or this
+ * throws (opt out for development with `allowInsecure: true`).
+ *
  * Layout per resource type, in the `fhir` schema by default:
  * - `"Patient"`: the current version (JSONB), one row per resource
  * - `"Patient_history"`: every version, including delete markers
  */
 export function postgresStorage(db: Database | PgPoolLike, options: PostgresStorageOptions = {}): FhirStorage {
+  // A pg Pool must use TLS unless it connects locally (see transport.ts).
+  if (!isDatabase(db)) assertSecureTransport(db, options);
   const database: Database = isDatabase(db) ? db : pgPoolDatabase(db as PgPoolLike);
   const schema = checkSchemaName(options.schema ?? 'fhir');
 
@@ -76,6 +83,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     versionId: number,
     resource: (AnyResource & { id: string }) | null,
     insert: boolean,
+    index: Indexer | undefined,
   ): Promise<StoredVersion> => {
     const t = tablesFor(schema, resourceType);
     const lastUpdated = new Date().toISOString();
@@ -99,11 +107,14 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       `INSERT INTO ${t.history} (id, version_id, last_updated, deleted, content) VALUES ($1, $2, $3, $4, $5::jsonb)`,
       [id, versionId, lastUpdated, deleted, content],
     );
+    // Search index rows are replaced in the same transaction, so a search never sees a stale index.
+    if (stamped && index) await writeIndexRows(tx, t, id, index(stamped));
+    else if (!stamped) await deleteIndexRows(tx, t, id);
     return { versionId: String(versionId), lastUpdated, deleted, resource: stamped };
   };
 
   return {
-    async migrate(resourceTypes): Promise<MigrationResult> {
+    async migrate(resourceTypes) {
       const migrations = migrationsFor(schema, resourceTypes);
       return database.transaction(async (tx) => {
         // Serialize concurrent migrations (several app instances starting at once).
@@ -119,13 +130,15 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
           await tx.query(`INSERT INTO ${ident(schema)}."_migrations" (id) VALUES ($1)`, [m.id]);
           applied.push(m.id);
         }
-        return { applied };
+        // New index tables are empty: existing resources of that type must be indexed.
+        const reindex = applied.filter(isIndexMigration).map((id) => id.split(':')[1]!);
+        return reindex.length ? { applied, reindex } : { applied };
       });
     },
 
-    create(resource) {
+    create(resource, opts = {}) {
       return run(resource.resourceType, () =>
-        database.transaction((tx) => writeVersion(tx, resource.resourceType, resource.id, 1, resource, true)),
+        database.transaction((tx) => writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, opts.index)),
       );
     },
 
@@ -138,9 +151,9 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
             throw FhirError.versionConflict(resourceType, id, opts.ifMatch, current?.v);
           }
           if (!current) {
-            return { version: await writeVersion(tx, resourceType, id, 1, resource, true), created: true };
+            return { version: await writeVersion(tx, resourceType, id, 1, resource, true, opts.index), created: true };
           }
-          const version = await writeVersion(tx, resourceType, id, Number(current.v) + 1, resource, false);
+          const version = await writeVersion(tx, resourceType, id, Number(current.v) + 1, resource, false, opts.index);
           return { version, created: current.deleted };
         }),
       );
@@ -151,7 +164,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
         database.transaction(async (tx) => {
           const current = await lockCurrent(tx, resourceType, id);
           if (!current || current.deleted) return undefined;
-          return writeVersion(tx, resourceType, id, Number(current.v) + 1, null, false);
+          return writeVersion(tx, resourceType, id, Number(current.v) + 1, null, false, undefined);
         }),
       );
     },
@@ -187,6 +200,44 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
           [id],
         );
         return rows.map(toVersion);
+      });
+    },
+
+    search(query) {
+      const t = tablesFor(schema, query.resourceType);
+      return run(query.resourceType, async () => {
+        const { rows, total } = await runSearch(database, t, query);
+        return { versions: rows.map((r) => toVersion(r as unknown as Row)), total };
+      });
+    },
+
+    reindex(resourceType, index) {
+      const t = tablesFor(schema, resourceType);
+      return run(resourceType, async () => {
+        let count = 0;
+        let after = '';
+        for (;;) {
+          const { rows } = await database.query<{ id: string }>(
+            `SELECT id FROM ${t.current} WHERE NOT deleted AND id > $1 ORDER BY id LIMIT 500`,
+            [after],
+          );
+          if (rows.length === 0) return count;
+          for (const { id } of rows) {
+            // One short transaction per resource, with the row locked, so concurrent writes are never overwritten.
+            await database.transaction(async (tx) => {
+              const { rows: locked } = await tx.query<Row>(
+                `SELECT version_id::text AS v, last_updated, deleted, content FROM ${t.current} WHERE id = $1 FOR UPDATE`,
+                [id],
+              );
+              const v = locked[0] ? toVersion(locked[0]) : undefined;
+              if (v?.resource && !v.deleted) {
+                await writeIndexRows(tx, t, id, index(v.resource));
+                count++;
+              }
+            });
+          }
+          after = rows[rows.length - 1]!.id;
+        }
       });
     },
   };

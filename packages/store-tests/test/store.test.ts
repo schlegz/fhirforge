@@ -32,14 +32,26 @@ describe.each(backends)('createFhirStore on $name', (backend) => {
   it('migrates once and is then up to date', async () => {
     const storage = await backend.storage();
     const store = makeStore(storage);
-    expect((await store.migrate()).applied).toEqual(['resource:Observation:1', 'resource:Patient:1']);
-    expect((await store.migrate()).applied).toEqual([]);
+    const first = await store.migrate();
+    expect(first.applied).toEqual([
+      'resource:Observation:1',
+      'resource:Observation:2',
+      'resource:Patient:1',
+      'resource:Patient:2',
+    ]);
+    expect(first.reindexed).toEqual({ Observation: 0, Patient: 0 });
+    expect(await store.migrate()).toEqual({ applied: [] });
   });
 
   it('serializes concurrent migrations (several instances starting at once)', async () => {
     const storage = await backend.storage();
     const results = await Promise.all([makeStore(storage).migrate(), makeStore(storage).migrate(), makeStore(storage).migrate()]);
-    expect(results.flatMap((r) => r.applied).sort()).toEqual(['resource:Observation:1', 'resource:Patient:1']);
+    expect(results.flatMap((r) => r.applied).sort()).toEqual([
+      'resource:Observation:1',
+      'resource:Observation:2',
+      'resource:Patient:1',
+      'resource:Patient:2',
+    ]);
   });
 
   it('creates and reads a Patient', async () => {

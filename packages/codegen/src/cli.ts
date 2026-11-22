@@ -43,7 +43,8 @@ async function main(): Promise<void> {
   const count = await writeGenerated(values.out!, generated);
   process.stdout.write(
     `Generated ${count} files for FHIR ${defs.fhirVersion}: ${generated.resourceTypes.length} resources, ` +
-      `${generated.complexTypes.length} datatypes, ${generated.primitiveTypes.length} primitives ` +
+      `${generated.complexTypes.length} datatypes, ${generated.primitiveTypes.length} primitives, ` +
+      `${generated.searchParameterCount} search parameters (${generated.unsupportedSearchParameterCount} not supported yet) ` +
       `in ${Date.now() - started} ms → ${values.out}\n`,
   );
 }

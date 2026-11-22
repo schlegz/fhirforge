@@ -35,6 +35,18 @@ export async function typed(): Promise<void> {
   // @ts-expect-error id is required for update
   await fhir.update({ resourceType: 'Patient' });
 
+  // search() returns the stored resource type.
+  const found = await fhir.search('Patient', { family: 'doe', _count: 10 });
+  expectTypeOf(found.resources).toEqualTypeOf<Stored<Patient>[]>();
+  expectTypeOf(found.total).toEqualTypeOf<number>();
+
+  // Search policy keys are checked against the configured resource types.
+  createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'none' } } });
+  // @ts-expect-error Observation is not configured
+  createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Observation.code': 'none' } } });
+  // @ts-expect-error not a policy
+  createFhirStore({ storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.birthdate': 'hidden' } } });
+
   // resources must be real resource types of the version.
   // @ts-expect-error Patiant is not an R4 resource type
   createFhirStore({ storage, fhir: r4, resources: ['Patiant'] });

@@ -1,4 +1,14 @@
+import type { IndexRow } from './search/index-rows.js';
+import type { SearchQuery } from './search/query.js';
 import type { AnyResource, MigrationResult } from './types.js';
+
+/** Computes a resource's search index rows. Called by the adapter on the stamped resource, inside the write transaction. */
+export type Indexer = (resource: AnyResource & { id: string }) => IndexRow[];
+
+export interface WriteOptions {
+  /** When set, the adapter replaces the resource's index rows in the same transaction. */
+  index?: Indexer;
+}
 
 /**
  * The contract between the store and a storage adapter (e.g. `@fhirforge/pg`).
@@ -9,20 +19,24 @@ import type { AnyResource, MigrationResult } from './types.js';
  * with `stampMeta`.
  */
 export interface FhirStorage {
-  /** Creates or upgrades the storage for these resource types. Safe to call repeatedly and concurrently. */
-  migrate(resourceTypes: readonly string[]): Promise<MigrationResult>;
+  /**
+   * Creates or upgrades the storage for these resource types. Safe to call
+   * repeatedly and concurrently. Lists in `reindex` the types whose index
+   * tables were just created, so existing resources need indexing.
+   */
+  migrate(resourceTypes: readonly string[]): Promise<MigrationResult & { reindex?: string[] }>;
 
   /** Inserts version 1. Throws FhirError.duplicate if the id exists (even if deleted). */
-  create(resource: AnyResource & { id: string }): Promise<StoredVersion>;
+  create(resource: AnyResource & { id: string }, options?: WriteOptions): Promise<StoredVersion>;
 
   /**
    * Writes a new version, or version 1 if the resource doesn't exist yet
    * (FHIR update-as-create). With `ifMatch`, throws FhirError.versionConflict
    * unless the current version equals it.
    */
-  update(resource: AnyResource & { id: string }, options?: { ifMatch?: string }): Promise<UpdateResult>;
+  update(resource: AnyResource & { id: string }, options?: { ifMatch?: string } & WriteOptions): Promise<UpdateResult>;
 
-  /** Records a delete as a new version. Returns undefined if there was nothing to delete. */
+  /** Records a delete as a new version and removes the resource's index rows. Returns undefined if there was nothing to delete. */
   delete(resourceType: string, id: string): Promise<StoredVersion | undefined>;
 
   /** The current version, including a deleted one (with `deleted: true`). */
@@ -33,6 +47,12 @@ export interface FhirStorage {
 
   /** Every version, newest first. */
   history(resourceType: string, id: string): Promise<StoredVersion[]>;
+
+  /** Runs a validated search over current, non-deleted resources. `total` counts all matches, not just this page. */
+  search(query: SearchQuery): Promise<{ versions: StoredVersion[]; total: number }>;
+
+  /** Rebuilds the index rows of every current resource of a type. Returns how many were indexed. */
+  reindex(resourceType: string, index: Indexer): Promise<number>;
 }
 
 export interface StoredVersion {

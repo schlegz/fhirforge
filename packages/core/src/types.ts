@@ -1,3 +1,5 @@
+import type { SearchParameterTable } from './search/types.js';
+
 /**
  * The smallest resource shape core relies on. Every generated resource type
  * (e.g. `@fhirforge/r4`'s Patient) is assignable to it.
@@ -14,6 +16,8 @@ export interface AnyResource {
  */
 export interface FhirVersionPackage<TMap> {
   readonly fhirVersion: string;
+  /** Compiled search parameters (generated). Without them, the store can't search. */
+  readonly searchParameters?: SearchParameterTable;
   readonly __resources?: TMap;
 }
 
@@ -38,4 +42,15 @@ export interface HistoryEntry<T> {
 export interface MigrationResult {
   /** Migration ids applied by this call, in order. Empty when already up to date. */
   applied: string[];
+  /** Resource type → resources indexed, when a migration added search indexes for existing data. */
+  reindexed?: Record<string, number>;
+}
+
+/** One page of search results. */
+export interface SearchResult<T> {
+  resources: T[];
+  /** Number of matches across all pages. */
+  total: number;
+  /** Parameters for the next page, or undefined on the last page. */
+  next?: Record<string, string | number | boolean | readonly (string | number)[] | undefined>;
 }

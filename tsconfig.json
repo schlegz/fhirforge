@@ -6,12 +6,15 @@
     "declaration": false,
     "declarationMap": false,
     "sourceMap": false,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "vitest.config.ts",
     "packages/codegen/test/**/*.ts",
     "packages/definitions/test/**/*.ts",
-    "packages/r4/scripts/**/*.ts"
+    "packages/r4/scripts/**/*.ts",
+    "packages/core/test/**/*.ts"
   ]
 }

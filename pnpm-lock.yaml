@@ -196,6 +196,9 @@ importers:
 
   packages/codegen:
     dependencies:
+      '@fhirforge/core':
+        specifier: workspace:*
+        version: link:../core
       '@fhirforge/definitions':
         specifier: workspace:*
         version: link:../definitions

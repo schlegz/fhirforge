@@ -8,3 +8,4 @@ export {
   type PgPoolLike,
   type PgPoolClientLike,
 } from './database.js';
+export { assertSecureTransport, inspectPoolTransport, type TransportOptions, type TransportCheck } from './transport.js';

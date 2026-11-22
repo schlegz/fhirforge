@@ -46,6 +46,14 @@ describe('generateTypes (R4)', () => {
     expect(file('datatypes.ts')).toContain('export interface Reference<T extends Resource = Resource> {');
   });
 
+  it('compiles search parameters into path data', () => {
+    const search = file('search-parameters.ts');
+    expect(search).toContain('{"code":"birthdate","type":"date","paths":[[{"f":"birthDate","t":"date"}]]}');
+    expect(search).toContain('"where":{"resolveIs":"Patient"}');
+    expect(search).toContain('"where":{"field":"system","equals":"phone"}');
+    expect(generated.searchParameterCount).toBeGreaterThan(2000);
+  });
+
   it('matches the committed output in packages/r4 (run `pnpm gen:r4` if this fails)', async () => {
     for (const [path, contents] of generated.files) {
       const committed = await readFile(join(committedDir, path), 'utf8').catch(() => '(missing)');
