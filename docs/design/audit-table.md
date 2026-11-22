@@ -1,6 +1,8 @@
 # Design: built-in audit table
 
-Status: **draft for review** (2026-11-22). Roadmap: Later → proposed next. Nothing here is implemented.
+Status: **implemented** (2026-11-22) with the proposed answers to every open question: opt-in, `actor` required, append-only triggers, no hash chain, expunge keeps audit rows, search result ids stored.
+
+Differences from the draft: a failed operation whose audit row can't be written throws an `AggregateError` holding the audit error and the original error. `storage.delete` takes `audit` rows like `create` and `update`. Every `onAudit` event now carries `operationId` too.
 
 ## Why
 

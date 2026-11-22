@@ -1,3 +1,4 @@
+import type { AuditOutcome, StoreAction } from './access.js';
 import type { IndexRow } from './search/index-rows.js';
 import type { SearchQuery } from './search/query.js';
 import type { AnyResource, MigrationResult } from './types.js';
@@ -8,7 +9,38 @@ export type Indexer = (resource: AnyResource & { id: string }) => IndexRow[];
 export interface WriteOptions {
   /** When set, the adapter replaces the resource's index rows in the same transaction. */
   index?: Indexer;
+  /**
+   * Audit rows to insert in the same transaction as the write (built-in audit
+   * table). The adapter fills in each row's `versionId` from the write: for a
+   * single write from its result, for `writeAll` from the result at index `write`.
+   */
+  audit?: readonly PendingAuditRow[];
 }
+
+/**
+ * One row of the built-in audit table: the same fields as `StoreAuditEvent`,
+ * with the caller as `actor` (from the app's `audit.actor`) instead of `ctx`.
+ * Never resource content, search values or error messages.
+ */
+export interface AuditRow {
+  /** Groups the rows of one operation (a Bundle's entries and the Bundle itself). */
+  operationId: string;
+  actor?: string;
+  system: boolean;
+  reason?: string;
+  action: StoreAction;
+  resourceType: string;
+  id?: string;
+  versionId?: string;
+  outcome: AuditOutcome;
+  status?: number;
+  params?: readonly string[];
+  ids?: readonly string[];
+  entries?: number;
+}
+
+/** An audit row written with data: `write` is the index of the `writeAll` result whose version it records. */
+export type PendingAuditRow = AuditRow & { write?: number };
 
 /**
  * The contract between the store and a storage adapter (e.g. `@fhirforge/pg`).
@@ -24,7 +56,13 @@ export interface FhirStorage {
    * repeatedly and concurrently. Lists in `reindex` the types whose index
    * tables were just created, so existing resources need indexing.
    */
-  migrate(resourceTypes: readonly string[]): Promise<MigrationResult & { reindex?: string[] }>;
+  migrate(resourceTypes: readonly string[], options?: { audit?: boolean }): Promise<MigrationResult & { reindex?: string[] }>;
+
+  /**
+   * Inserts audit rows on their own (reads, denials, failures). Never reads
+   * them back: the runtime role only has INSERT on the audit table.
+   */
+  recordAudit(rows: readonly AuditRow[]): Promise<void>;
 
   /** Inserts version 1. Throws FhirError.duplicate if the id exists (even if deleted). */
   create(resource: AnyResource & { id: string }, options?: WriteOptions): Promise<StoredVersion>;
@@ -45,7 +83,11 @@ export interface FhirStorage {
    * Returns undefined if there was nothing to delete. With `ifMatch`, throws
    * FhirError.versionConflict unless the current version equals it.
    */
-  delete(resourceType: string, id: string, options?: { ifMatch?: string }): Promise<StoredVersion | undefined>;
+  delete(
+    resourceType: string,
+    id: string,
+    options?: { ifMatch?: string } & Pick<WriteOptions, 'audit'>,
+  ): Promise<StoredVersion | undefined>;
 
   /** The current version, including a deleted one (with `deleted: true`). */
   read(resourceType: string, id: string): Promise<StoredVersion | undefined>;
@@ -68,7 +110,9 @@ export interface FhirStorage {
    * method of its kind. Rows are locked in a fixed order (resource type, then
    * id) so concurrent calls can't deadlock; the store never passes two writes
    * for the same resource. Any failure rolls back every write and rethrows that
-   * write's error. Returns one result per write, in input order.
+   * write's error. Returns one result per write, in input order. With
+   * `options.audit`, the audit rows are inserted in the same transaction (also
+   * when `writes` is empty).
    */
   writeAll(writes: readonly PlannedWrite[], options?: WriteOptions): Promise<WriteResult[]>;
 }

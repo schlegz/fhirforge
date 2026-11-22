@@ -62,6 +62,8 @@ export interface StoreAuditEvent<Ctx> {
   ids?: string[];
   /** For `transaction` and `batch`: how many entries the Bundle had (each entry also gets its own event). */
   entries?: number;
+  /** Shared by every event of one operation: a Bundle's entry events and its Bundle event. */
+  operationId: string;
 }
 
 export type AuditSink<Ctx> = (event: StoreAuditEvent<Ctx>) => void | Promise<void>;
@@ -88,4 +90,18 @@ export interface AccessOptions<Ctx> {
    * only to route audit failures somewhere you will notice (alerting).
    */
   onAuditError?: (error: unknown, event: StoreAuditEvent<Ctx>) => void;
+  /**
+   * The built-in audit table (`fhir."_audit"`), written in the same database
+   * transaction as each write, so a change and its record commit together.
+   * Append-only for the runtime role (INSERT only). `onAudit` still works
+   * alongside it. Table failures are never swallowed: the operation fails.
+   */
+  audit?: {
+    table: true;
+    /**
+     * Identifies the caller in each row: a stable, non-secret id (user id,
+     * service name), never a token. The store never stores `ctx` itself.
+     */
+    actor: (ctx: Ctx) => string;
+  };
 }

@@ -41,6 +41,7 @@ fhirforge/
 │                                              store.test.ts (CRUD, history, validation on write), search.test.ts,
 │                                              bundle.test.ts (transaction / batch, rollback, races, deadlock),
 │                                              http.test.ts (REST handler over real Request objects),
+│                                              audit.test.ts (audit table, atomicity, append-only, runtime-role grants),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -176,7 +177,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
 | `onAudit` hook: every data operation, including denials and failures, without content or search values | In place |
 | Runtime validation of every write against the base spec (paths-only issues, ≤ 100 issues, nesting depth ≤ 64, linear-time primitive checks) | In place (tested in `validation.test.ts`, `store.test.ts`, `access.test.ts`) |
-| Built-in append-only audit table | Planned |
+| Built-in append-only audit table (`audit: { table: true, actor }`): rows written in the write's transaction; INSERT-only for the runtime role; triggers refuse UPDATE / DELETE / TRUNCATE | In place (tested in `audit.test.ts`, including a restricted role on Postgres) |
 | Field-level encryption (`encryptor` hook, envelope encryption, key ID per row) | Planned |
 | Per-search-parameter index policy | Partly: `plaintext` and `none` in place; `blind` planned (rejected at `createFhirStore`) |
 | Expunge (remove all versions and index rows) | Planned |
@@ -207,7 +208,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 
 - All tables live in the configured schema (`fhir` by default) and never touch the app's tables.
 - Migrations need a privileged role. The runtime store must work with a role that has only `SELECT`, `INSERT`, `UPDATE` on fhirforge tables, plus `DELETE` on the search index tables (index rows are replaced on every write) and, later, wherever expunge requires it. Don't add runtime code that needs DDL or superuser rights. Document required grants when adding tables.
-- When the audit table is added, the runtime role gets `INSERT` only on it: no `UPDATE` or `DELETE`.
+- The runtime role gets `INSERT` only on `_audit`: no `SELECT`, `UPDATE` or `DELETE`. Never use `RETURNING` on audit inserts or read the table at runtime (it would need `SELECT`). `audit.test.ts` checks the documented grants with a restricted role on Postgres; update both together.
 
 ### 4. Transmission security
 
@@ -223,7 +224,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 
 ### 6. Integrity, history and retention
 
-- Every write is atomic: the current row, its history row and its search index rows are written in one transaction. Keep it that way for new write paths (audit rows). A Bundle transaction goes through `FhirStorage.writeAll`, which applies all its writes in one database transaction and locks rows in a fixed code-unit order (resource type, then id) so concurrent transactions can't deadlock; never sort with `localeCompare` there. `reindex` rewrites one resource per transaction with the row locked, so it never overwrites a concurrent write.
+- Every write is atomic: the current row, its history row and its search index rows are written in one transaction. With the audit table on, the operation's audit rows are written in that same transaction (`WriteOptions.audit`); keep it that way for new write paths. A Bundle transaction goes through `FhirStorage.writeAll`, which applies all its writes in one database transaction and locks rows in a fixed code-unit order (resource type, then id) so concurrent transactions can't deadlock; never sort with `localeCompare` there. `reindex` rewrites one resource per transaction with the row locked, so it never overwrites a concurrent write.
 - Index tables reference the resource row with `ON DELETE CASCADE`. Any new derived table holding resource data must do the same (or be covered by expunge explicitly).
 - History keeps PHI after update and delete. When adding expunge, it must remove every version, every search index row and every derived copy for that resource, in one transaction, and be its own explicitly named operation (never a side effect of `delete`).
 - Optimistic locking must stay race-free: read-then-write paths lock the row (`FOR UPDATE`) inside the transaction.
@@ -242,6 +243,7 @@ How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these propert
 - Search: the policy's `filter` is ANDed into the query (it can't set `_count`, `_offset` or `_sort`), and every result is checked again as a `read`. If any result is removed, `total` is omitted.
 - `onAudit` gets one `StoreAuditEvent` per data operation (success, denied, not-found, error): `ctx`, system and reason, action, resource type, id, version, outcome, status, and for searches the parameter names and returned ids. Never add resource content, search values or error messages to events.
 - If `onAudit` throws, the operation fails and the result is withheld (writes have already committed), unless the app passes `onAuditError`. Don't swallow audit errors anywhere else.
+- The audit table (`audit: { table: true, actor }`): successful writes pass their rows to the storage write (`withRows` in `audited`, `pendingRows` for Bundles), so data and audit commit together; reads and failures go through `storage.recordAudit`. Table failures are never swallowed (`onAuditError` doesn't apply to them). Rows hold the event's fields plus `actor` from the app's mapping: never store `ctx`, content, search values or error messages. A Bundle's entries share the Bundle's `operationId`. fhirforge never deletes audit rows, and expunge (later) must not either.
 - `migrate()` and `reindex()` are maintenance operations on the store and are not audited. Don't expose resource data through them.
 - New data operations (`_include`, chained search, new HTTP adapters) must go through the same scope, policy and audit path. An `_include`d or chained resource is a read of that resource and needs its own check.
 
