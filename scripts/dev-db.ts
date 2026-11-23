@@ -4,6 +4,7 @@
  *   pnpm dev:db                    # asks for the database name
  *   pnpm dev:db fhir_dev           # or pass it
  *   pnpm dev:db fhir_dev --pglite  # no server: an in-process PGlite database in .fhir-dev/fhir_dev
+ *   pnpm dev:db fhir_dev --schema t_acme,t_globex  # schema per tenant: migrate these schemas (default: fhir)
  *
  * Postgres: connects to the server in FHIRFORGE_DEV_DATABASE_URL (default
  * postgres://postgres@localhost:5432/postgres; put the password there or in PGPASSWORD),
@@ -27,7 +28,13 @@ const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
 const args = process.argv.slice(2);
 const usePglite = args.includes('--pglite');
-let name = args.find((a) => !a.startsWith('--'));
+const schemaArg = args.indexOf('--schema');
+const schemas = schemaArg === -1 ? ['fhir'] : (args[schemaArg + 1] ?? '').split(',').filter(Boolean);
+if (schemas.length === 0 || schemas.some((s) => !NAME.test(s))) {
+  console.error('--schema takes a comma-separated list of schema names (lowercase letters, digits, _).');
+  process.exit(1);
+}
+let name = args.find((a, i) => !a.startsWith('--') && i !== schemaArg + 1);
 
 if (!name) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -50,14 +57,14 @@ const redact = (url: URL) => {
 };
 
 const started = Date.now();
-let applied: string[];
+let applied: string[] = [];
 
 if (usePglite) {
   const dir = resolve('.fhir-dev', name);
   mkdirSync(dir, { recursive: true });
   const db = new PGlite(dir);
   try {
-    ({ applied } = await pgliteStorage(db).migrate(resourceTypes, migrateOptions));
+    for (const schema of schemas) applied.push(...(await pgliteStorage(db, { schema }).migrate(resourceTypes, migrateOptions)).applied);
   } finally {
     await db.close();
   }
@@ -97,7 +104,7 @@ if (usePglite) {
   target.pathname = `/${name}`;
   const pool = new pg.Pool({ connectionString: target.toString(), max: 2 });
   try {
-    ({ applied } = await postgresStorage(pool).migrate(resourceTypes, migrateOptions));
+    for (const schema of schemas) applied.push(...(await postgresStorage(pool, { schema }).migrate(resourceTypes, migrateOptions)).applied);
   } finally {
     await pool.end();
   }
@@ -106,6 +113,6 @@ if (usePglite) {
 
 console.log(
   applied.length
-    ? `Applied ${applied.length} migrations for ${resourceTypes.length} resource types in ${Date.now() - started} ms.`
-    : `Already up to date (${resourceTypes.length} resource types).`,
+    ? `Applied ${applied.length} migrations for ${resourceTypes.length} resource types in schema ${schemas.join(', ')} (${Date.now() - started} ms).`
+    : `Already up to date (${resourceTypes.length} resource types, schema ${schemas.join(', ')}).`,
 );

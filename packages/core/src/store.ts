@@ -228,6 +228,9 @@ function normalizeVersion(value: string | undefined): string | undefined {
   return value.trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
 }
 
+/** Compiled validators, shared by every store of the same version package (e.g. one store per tenant). */
+const validators = new WeakMap<object, ReturnType<typeof createValidator>>();
+
 /** Most parameter values in a conditional operation's condition. */
 const MAX_CONDITION_PARAMS = 10;
 
@@ -300,7 +303,8 @@ export function createFhirStore<
   for (const t of resourceTypes) {
     if (!fhir.validation.resources.includes(t)) throw new Error(`createFhirStore: ${String(t)} is not a resource type in FHIR ${fhir.fhirVersion}`);
   }
-  const validator = createValidator(fhir.validation);
+  let validator = validators.get(fhir.validation);
+  if (!validator) validators.set(fhir.validation, (validator = createValidator(fhir.validation)));
   /** Rejects a resource that doesn't conform to the base spec (400, one issue per problem, paths only). */
   const validate = (resourceType: string, resource: unknown) => {
     const issues = validator(resource);
