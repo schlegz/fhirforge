@@ -17,7 +17,39 @@ export interface WriteOptions {
   audit?: readonly PendingAuditRow[];
   /** For a conditional write: re-checked under a lock in the write transaction (412 if it changed). */
   condition?: WriteCondition;
+  /**
+   * Encryption at rest: the adapter calls it on the stamped resource (after assigning the
+   * version) and stores the result instead of the plaintext body. Index rows are still
+   * computed from the plaintext, as without encryption.
+   */
+  seal?: Sealer;
 }
+
+/** An encrypted body, as a storage adapter stores and returns it (base64). */
+export interface SealedBody {
+  resourceType: string;
+  id: string;
+  /** Format byte, nonce, ciphertext and tag, base64. */
+  enc: string;
+  /** The data key it was encrypted with (see `FhirStorage.dataKeys`). */
+  dekId: string;
+  /** The wrapped data key, when the adapter already has it (e.g. inside a transaction), so opening needs no lookup. */
+  key?: { keyId: string; wrapped: string };
+}
+
+/** What `seal` returns: the encrypted body plus its data key, which the adapter stores once. */
+export interface SealedWrite {
+  enc: string;
+  dekId: string;
+  /** The master key that wrapped the data key, and the wrapped data key (base64). */
+  keyId: string;
+  wrapped: string;
+}
+
+export type Sealer = (resource: AnyResource & { id: string; meta: { versionId: string; lastUpdated: string } }) => Promise<SealedWrite>;
+
+/** Decrypts a stored version (returns it unchanged when it isn't encrypted). */
+export type Opener = (version: StoredVersion) => Promise<StoredVersion>;
 
 /**
  * The guard of a conditional write (`If-None-Exist`, `PUT Type?…`, `DELETE Type?…`).
@@ -72,7 +104,10 @@ export interface FhirStorage {
    * repeatedly and concurrently. Lists in `reindex` the types whose index
    * tables were just created, so existing resources need indexing.
    */
-  migrate(resourceTypes: readonly string[], options?: { audit?: boolean }): Promise<MigrationResult & { reindex?: string[] }>;
+  migrate(
+    resourceTypes: readonly string[],
+    options?: { audit?: boolean; encryption?: boolean },
+  ): Promise<MigrationResult & { reindex?: string[] }>;
 
   /**
    * Inserts audit rows on their own (reads, denials, failures). Never reads
@@ -130,8 +165,25 @@ export interface FhirStorage {
   /** Runs a validated search over current, non-deleted resources. `total` counts all matches, not just this page. */
   search(query: SearchQuery): Promise<{ versions: StoredVersion[]; total: number }>;
 
-  /** Rebuilds the index rows of every current resource of a type. Returns how many were indexed. */
-  reindex(resourceType: string, index: Indexer): Promise<number>;
+  /**
+   * Rebuilds the index rows of every current resource of a type. Returns how many were indexed.
+   * `open` decrypts encrypted rows first.
+   */
+  reindex(resourceType: string, index: Indexer, options?: { open?: Opener }): Promise<number>;
+
+  /** The wrapped data keys with these ids (for decryption). */
+  dataKeys(ids: readonly string[]): Promise<{ id: string; keyId: string; wrapped: string }[]>;
+
+  /**
+   * Re-encrypts every version (current and history) of every resource of a type whose body is
+   * plaintext or whose data key is older than `olderThan` (ISO instant), one resource per
+   * transaction with its row locked. The content doesn't change. Returns how many resources
+   * were rewritten.
+   */
+  reencrypt(
+    resourceType: string,
+    options: { open: Opener; seal: Sealer; olderThan?: string; /** Called before each resource's transaction (KMS calls stay outside it). */ prepare?: () => Promise<void> },
+  ): Promise<number>;
 
   /**
    * Applies every write in one database transaction, all or nothing (Bundle
@@ -163,8 +215,10 @@ export interface StoredVersion {
   /** ISO 8601 instant. */
   lastUpdated: string;
   deleted: boolean;
-  /** The resource with its meta stamped; null for a delete version. */
+  /** The resource with its meta stamped; null for a delete version, or while it's still encrypted. */
   resource: (AnyResource & { id: string }) | null;
+  /** Set when the body is stored encrypted and hasn't been opened yet. */
+  sealed?: SealedBody;
 }
 
 export interface UpdateResult {

@@ -183,6 +183,8 @@ export interface SearchRow {
   last_updated: Date | string;
   deleted: boolean;
   content: unknown;
+  enc: string | null;
+  dek_id: string | null;
   total: string | number;
 }
 
@@ -192,7 +194,7 @@ export async function runSearch(db: SqlClient, t: Tables, query: SearchQuery): P
   const order = [...query.sort.map((k) => sortSql(sql, t, k)), 'r.id ASC'].join(', ');
   const limit = sql.bind(query.count);
   const offset = sql.bind(query.offset);
-  const text = `SELECT r.id, r.version_id::text AS v, r.last_updated, r.deleted, r.content, count(*) OVER () AS total
+  const text = `SELECT r.id, r.version_id::text AS v, r.last_updated, r.deleted, r.content, encode(r.enc, 'base64') AS enc, r.dek_id::text AS dek_id, count(*) OVER () AS total
 FROM ${t.current} r
 WHERE ${where}
 ORDER BY ${order}

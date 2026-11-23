@@ -151,6 +151,25 @@ await fhir.as(session).conditionalDelete('Patient', mrn); // delete the match, i
 - **No duplicates from concurrent retries:** writes with the same condition are serialized. In the write transaction, the store takes a lock on the condition and checks it again; if it no longer matches as it did (someone created a match meanwhile), the write fails with 412 and nothing is written. Retrying then returns the existing resource. This holds among conditional writes with the same condition. It doesn't cover an unconditional `create` that happens to match, or two different conditions that match the same resource: use one identifier per condition, and a unique constraint in your own schema if you need a hard guarantee across all writers.
 - `conditionalUpdate` won't overwrite a resource that doesn't match: with no match and a body `id` that already exists, it's 412.
 
+### Encryption at rest
+
+Disk encryption protects a stolen disk. To protect against a leaked dump or backup, or an over-privileged read role, encrypt resource bodies with keys from your KMS:
+
+```ts
+const fhir = createFhirStore({
+  storage, fhir: r4, resources: ['Patient', 'Observation'], authorize,
+  encryption: { keys: kmsKeyProvider }, // { wrap(dataKey), unwrap(keyId, wrapped) } backed by AWS KMS, GCP KMS, Vault, ...
+  search: { policy: { 'Patient.address': 'none' } }, // index rows aren't encrypted: see below
+});
+```
+
+- **What's encrypted:** every resource body, current and history, with envelope encryption. fhirforge generates 256-bit data keys, your `KeyProvider` wraps them with a master key that never leaves the KMS, and bodies are encrypted with AES-256-GCM (Web Crypto, a random 96-bit nonce each time). Each row stores its data key's id; each data key stores the master key id.
+- **Tamper-evident:** a ciphertext is bound to its row (`Type/id/_history/version`), so a body copied to another resource or version fails to decrypt (`could not decrypt Patient/123`, a 500-class error with no content).
+- **KMS calls:** a data key is reused for at most 5 minutes or 100,000 encryptions (`dataKeyMaxAgeMs`, `dataKeyMaxUses`), and unwrapped keys are cached for reads (`dataKeyCacheSize`), so the KMS is called once per window, not per write, and never inside a database transaction. If the KMS fails, the operation fails; nothing is ever written in plaintext instead.
+- **Not encrypted:** resource type, id, version, `lastUpdated`, and **search index rows**, which are readable copies of the values they index. Give sensitive parameters the `none` search policy. The `blind` policy (keyed hashes, exact match only) is coming next.
+- **Turning it on for existing data:** existing plaintext rows stay readable, so you can enable encryption without downtime. Then run `await fhir.reencrypt()` once to encrypt them. After the master key rotates in the KMS, `await fhir.reencrypt({ olderThan: rotationDate })` moves every version to a new data key. It works one resource per transaction, with the row locked.
+- **Mixed mode is a trade-off:** while plaintext rows are readable, someone with *write* access to the database could put plaintext in place of a ciphertext and it would be served. Run `reencrypt()` after enabling encryption. A strict mode that refuses plaintext rows is planned.
+
 ### Expunge
 
 `delete` keeps every version (FHIR history). To remove a resource for good, for example for a data-deletion request, enable expunge when you create the store and call it with a reason:
@@ -246,6 +265,7 @@ Everything lives in its own schema (`fhir` by default, configurable), never mixe
 - `fhir."Patient_history"`: every version, including delete markers
 - `fhir."Patient_string"`, `_token`, `_date`, `_reference`, `_number`, `_quantity`, `_uri`: search index rows, replaced in the same transaction as each write, removed with the resource
 - `fhir."_migrations"`: applied migration ids
+- `fhir."_data_keys"` (with `encryption`): wrapped data keys (never plaintext keys); rows' `enc` and `dek_id` columns hold encrypted bodies, with `content` NULL
 - `fhir."_audit"` (with `audit: { table: true }`): the append-only audit log, one row per operation (no resource content)
 
 The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on the resource, history and index tables, plus `DELETE` on the index tables (index rows are replaced on every write), and only `INSERT` on `_audit`: no `SELECT`, `UPDATE` or `DELETE`, so the application can't read or change the audit log. Read it with a separate auditor role. Only `migrate()` needs DDL rights.
@@ -256,6 +276,8 @@ GRANT SELECT, INSERT, UPDATE ON fhir."Patient", fhir."Patient_history" TO app_ru
 GRANT SELECT, INSERT, UPDATE, DELETE ON fhir."Patient_string", fhir."Patient_token", fhir."Patient_date",
   fhir."Patient_reference", fhir."Patient_number", fhir."Patient_quantity", fhir."Patient_uri" TO app_runtime;
 GRANT INSERT ON fhir."_audit" TO app_runtime;
+-- With encryption on:
+GRANT SELECT, INSERT ON fhir."_data_keys" TO app_runtime;
 -- Only for expunge, on the role of the expunge storage (a separate role if you pass `expunge: { storage }`):
 GRANT DELETE ON fhir."Patient", fhir."Patient_history" TO app_expunge;
 ```
@@ -313,10 +335,11 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 - The REST handler (`@fhirforge/http`, both the fetch-style and the Node adapter) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
+- With `encryption`, resource bodies (current and history) are encrypted at rest with your KMS's keys (envelope encryption, AES-256-GCM, ciphertexts bound to their row); search index rows are not, so sensitive parameters should use the `none` policy.
 - `expunge` (off unless enabled) removes a resource's every version and index row in one transaction (history and index rows are copies of PHI), as its own policy-checked operation with a required reason, audited; audit rows are kept. It can run on its own connection, so the everyday runtime role never needs `DELETE` on resource data.
 - The optional audit table records every operation append-only, and writes a change and its audit row in one database transaction, so a committed change always has its record.
 
-What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: field-level encryption and blind (keyed-hash) search indexes. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
+What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: blind (keyed-hash) search indexes and a strict mode that refuses plaintext rows once everything is encrypted. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
 
 ## Development
 

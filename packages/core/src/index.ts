@@ -18,6 +18,7 @@ export {
   type BundleResponse,
   type BundleResponseEntry,
 } from './bundle.js';
+export { encryptedStorage, type EncryptionOptions, type KeyProvider } from './encryption.js';
 export { FhirError, isFhirError, type IssueCode, type OperationOutcomeLike, type OutcomeIssue } from './errors.js';
 export {
   stampMeta,
@@ -29,6 +30,10 @@ export {
   type StoredVersion,
   type UpdateResult,
   type WriteOptions,
+  type Opener,
+  type SealedBody,
+  type SealedWrite,
+  type Sealer,
   type WriteCondition,
   type WriteResult,
 } from './storage.js';

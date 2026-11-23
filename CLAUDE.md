@@ -20,6 +20,7 @@ fhirforge/
 │   ├── core/          @fhirforge/core         createFhirStore, FhirError, the FhirStorage contract. Version-neutral. No I/O.
 │   │   ├── src/store.ts                       Scopes (as / asSystem), authorization checks, audit, data operations,
 │   │   │                                      write planning (planCreate / planUpdate / planDelete), transaction / batch.
+│   │   ├── src/encryption.ts                  Encryption at rest: KeyProvider, data-key ring, encryptedStorage (seal/open).
 │   │   ├── src/bundle.ts                      Bundle request parsing, urn:uuid reference resolution, response entries, limits.
 │   │   ├── src/access.ts                      authorize / onAudit types: AuthorizeRequest, StoreAuditEvent, StoreAction.
 │   │   ├── src/search/                        Index extraction (index-rows.ts), query parsing (query.ts), value
@@ -46,6 +47,7 @@ fhirforge/
 │                                              links.test.ts (chained search, _include / _revinclude, policy, limits),
 │                                              expunge.test.ts (expunge, pinning, audit rows kept, grants),
 │                                              conditional.test.ts (conditional create/update/delete, races, Bundles),
+│                                              encryption.test.ts (encrypted rows, tampering, KMS, reencrypt, rotation),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -184,7 +186,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | `onAudit` hook: every data operation, including denials and failures, without content or search values | In place |
 | Runtime validation of every write against the base spec (paths-only issues, ≤ 100 issues, nesting depth ≤ 64, linear-time primitive checks) | In place (tested in `validation.test.ts`, `store.test.ts`, `access.test.ts`) |
 | Built-in append-only audit table (`audit: { table: true, actor }`): rows written in the write's transaction; INSERT-only for the runtime role; triggers refuse UPDATE / DELETE / TRUNCATE | In place (tested in `audit.test.ts`, including a restricted role on Postgres) |
-| Field-level encryption (`encryptor` hook, envelope encryption, key ID per row) | Planned |
+| Encryption at rest (`encryption: { keys }`): bodies, current and history, envelope encryption with app-KMS-wrapped data keys, AES-256-GCM, random nonces, `Type/id/_history/version` as AAD, data key id per row; `reencrypt()` for legacy rows and rotation | In place for bodies (tested in `encryption.test.ts`); blind indexes and a strict no-plaintext mode planned |
 | Per-search-parameter index policy | Partly: `plaintext` and `none` in place; `blind` planned (rejected at `createFhirStore`) |
 | Expunge (`expunge(type, id, { reason })`, opt-in via `createFhirStore({ expunge })`, optionally on its own privileged storage): every version and index row in one transaction, row locked, pinned, policy action `expunge`, reason required and audited; audit rows kept | In place (tested in `expunge.test.ts`, including a DELETE-less runtime role on Postgres) |
 | Multi-tenancy with Postgres row-level security | Planned (optional) |
@@ -213,7 +215,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 ### 3. Database roles and schema
 
 - All tables live in the configured schema (`fhir` by default) and never touch the app's tables.
-- Migrations need a privileged role. The runtime store must work with a role that has only `SELECT`, `INSERT`, `UPDATE` on fhirforge tables, plus `DELETE` on the search index tables (index rows are replaced on every write) and `DELETE` on the resource and history tables only for the role that runs expunge (the `expunge.storage` role when configured, so the runtime role can stay without it). Don't add runtime code that needs DDL or superuser rights. Document required grants when adding tables.
+- Migrations need a privileged role. The runtime store must work with a role that has only `SELECT`, `INSERT`, `UPDATE` on fhirforge tables, plus `DELETE` on the search index tables (index rows are replaced on every write) and `DELETE` on the resource and history tables only for the role that runs expunge (the `expunge.storage` role when configured, so the runtime role can stay without it). With encryption, it also needs `SELECT, INSERT` on `_data_keys`. Don't add runtime code that needs DDL or superuser rights. Document required grants when adding tables.
 - The runtime role gets `INSERT` only on `_audit`: no `SELECT`, `UPDATE` or `DELETE`. Never use `RETURNING` on audit inserts or read the table at runtime (it would need `SELECT`). `audit.test.ts` checks the documented grants with a restricted role on Postgres; update both together.
 
 ### 4. Transmission security
@@ -224,7 +226,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 ### 5. Encryption
 
 - **At rest:** fhirforge relies on database/disk encryption (e.g. RDS or Cloud SQL with KMS keys) and documents it as a requirement. Don't implement custom disk-level crypto.
-- **Field-level (planned design):** an optional `encryptor` hook encrypts resource bodies in the app before they reach the database, using envelope encryption with a key ID stored on each row so keys can rotate. Keys never go to the database: don't use `pgcrypto` with keys in SQL.
+- **Bodies (in place):** `core/src/encryption.ts` wraps the storage adapter (`encryptedStorage`): `seal` encrypts the stamped resource inside the adapter's write (after the version is known), `open` decrypts on read in core. Adapters only move base64 bytes and never see keys. Keys come from the app's `KeyProvider` (KMS); data keys are wrapped, stored in `_data_keys`, reused for a bounded window, cached unwrapped for reads, and never cause a KMS call inside a database transaction (`prepare()` runs before). Anything that opens rows inside a transaction (reindex, reencrypt) must attach the wrapped key read on that transaction's connection (`withKey` in `pg/src/storage.ts`). A KMS or decryption failure fails the operation; never fall back to plaintext. Decryption errors name type and id only. Keys never go to the database: don't use `pgcrypto` with keys in SQL.
 - Use vetted primitives only: Node's `crypto` (AES-256-GCM with a random 96-bit nonce per encryption) or a well-known library. Never invent a cipher mode, reuse nonces, or use ECB, unauthenticated CBC, MD5 or SHA-1 for security purposes.
 - **Search indexes hold readable copies of PHI.** Each search parameter gets a policy (`createFhirStore({ search: { policy } })`, keyed `ResourceType.code`): `plaintext` (full search), `blind` (HMAC of the normalized value with a separate key; exact match only) or `none`. Decided: `Patient.name` and `Patient.birthdate` default to `plaintext`, with `blind` available per parameter. Blind indexes support only exact match: document which searches stop working. Don't add order-preserving encryption.
 
