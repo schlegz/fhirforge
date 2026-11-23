@@ -18,13 +18,15 @@ export type SearchCondition =
   | { kind: 'reference'; targetType?: string; targetId?: string; reference?: string }
   | { kind: 'number'; prefix: Prefix; value: string; low: string; high: string }
   | { kind: 'quantity'; prefix: Prefix; value: string; low: string; high: string; system?: string | null; code?: string }
-  | { kind: 'uri'; value: string };
+  | { kind: 'uri'; value: string }
+  /** A blind index lookup: the keyed hash of the search value. */
+  | { kind: 'blind'; keyId: string; hash: string };
 
 /** One query parameter. Clauses are ANDed. */
 export interface SearchClause {
   param: string;
-  /** `id` and `lastUpdated` are answered from the resource table (`_id`, `_lastUpdated`). */
-  type: SearchParamType | 'id' | 'lastUpdated';
+  /** `id` and `lastUpdated` are answered from the resource table (`_id`, `_lastUpdated`); `blind` from the blind index. */
+  type: SearchParamType | 'id' | 'lastUpdated' | 'blind';
   conditions: SearchCondition[];
   /** `:not` (tokens): match resources with no matching value. */
   negate?: boolean;
@@ -105,7 +107,7 @@ function splitModifier(key: string): [string, string | undefined] {
   return i === -1 ? [key, undefined] : [key.slice(0, i), key.slice(i + 1)];
 }
 
-type Def = Pick<CompiledSearchParameter, 'code' | 'targets'> & { type: SearchClause['type'] };
+type Def = Pick<CompiledSearchParameter, 'code' | 'targets'> & { type: SearchParamType | 'id' | 'lastUpdated' };
 
 function lookup(
   defs: Map<string, CompiledSearchParameter>,

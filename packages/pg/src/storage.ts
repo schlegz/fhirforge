@@ -148,7 +148,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       [id, versionId, lastUpdated, deleted, content, enc, dekId],
     );
     // Search index rows are replaced in the same transaction, so a search never sees a stale index.
-    if (stamped && index) await writeIndexRows(tx, t, id, index(stamped));
+    if (stamped && index) await writeIndexRows(tx, t, id, await index(stamped));
     else if (!stamped) await deleteIndexRows(tx, t, id);
     return { versionId: String(versionId), lastUpdated, deleted, resource: stamped };
   };
@@ -448,7 +448,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
                 v = await reindexOptions.open(await withKey(tx, v));
               }
               if (v?.resource && !v.deleted) {
-                await writeIndexRows(tx, t, id, index(v.resource));
+                await writeIndexRows(tx, t, id, await index(v.resource));
                 count++;
               }
             });

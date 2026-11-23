@@ -166,7 +166,12 @@ const fhir = createFhirStore({
 - **What's encrypted:** every resource body, current and history, with envelope encryption. fhirforge generates 256-bit data keys, your `KeyProvider` wraps them with a master key that never leaves the KMS, and bodies are encrypted with AES-256-GCM (Web Crypto, a random 96-bit nonce each time). Each row stores its data key's id; each data key stores the master key id.
 - **Tamper-evident:** a ciphertext is bound to its row (`Type/id/_history/version`), so a body copied to another resource or version fails to decrypt (`could not decrypt Patient/123`, a 500-class error with no content).
 - **KMS calls:** a data key is reused for at most 5 minutes or 100,000 encryptions (`dataKeyMaxAgeMs`, `dataKeyMaxUses`), and unwrapped keys are cached for reads (`dataKeyCacheSize`), so the KMS is called once per window, not per write, and never inside a database transaction. If the KMS fails, the operation fails; nothing is ever written in plaintext instead.
-- **Not encrypted:** resource type, id, version, `lastUpdated`, and **search index rows**, which are readable copies of the values they index. Give sensitive parameters the `none` search policy. The `blind` policy (keyed hashes, exact match only) is coming next.
+- **Not encrypted:** resource type, id, version, `lastUpdated`, and **search index rows of `plaintext` parameters**, which are readable copies of the values they index. Give sensitive parameters the `blind` policy (keyed hashes, exact match only; see [Search](#search)) or `none`:
+
+  ```ts
+  encryption: { keys: kmsKeyProvider, blindIndexKey: () => secrets.get('fhir-blind-index') }, // { id, key: 32+ bytes }
+  search: { policy: { 'Patient.family': 'blind', 'Patient.identifier': 'blind', 'Patient.birthdate': 'blind', 'Patient.address': 'none' } },
+  ```
 - **Turning it on for existing data:** existing plaintext rows stay readable, so you can enable encryption without downtime. Then run `await fhir.reencrypt()` once to encrypt them. After the master key rotates in the KMS, `await fhir.reencrypt({ olderThan: rotationDate })` moves every version to a new data key. It works one resource per transaction, with the row locked.
 - **Mixed mode is a trade-off:** while plaintext rows are readable, someone with *write* access to the database could put plaintext in place of a ciphertext and it would be served. Run `reencrypt()` after enabling encryption. A strict mode that refuses plaintext rows is planned.
 
@@ -255,7 +260,15 @@ Not supported yet: composite and special parameters, chains deeper than one leve
 createFhirStore({ storage, fhir: r4, resources: ['Patient'], authorize, search: { policy: { 'Patient.birthdate': 'none' } } });
 ```
 
-`plaintext` (default) indexes the value for full search. `none` doesn't index it and makes it unsearchable. `blind` (keyed-hash, exact match only) is planned. After changing the policy, run `await fhir.reindex()`.
+`plaintext` (default) indexes the value for full search. `none` doesn't index it and makes it unsearchable. `blind` stores a keyed hash (HMAC-SHA-256) of the normalized value instead of the value, so the parameter stays searchable by exact match while the database holds no readable copy. It needs `encryption.blindIndexKey` and works for string, token and date parameters. After changing the policy, run `await fhir.reindex()`.
+
+| Blind parameter type | Still works | Stops working (400) |
+| --- | --- | --- |
+| string | the whole value, ignoring case and accents: `family=doe` finds `Doé` | prefix match (the default: `family=do` finds nothing), `:contains`, `:exact`, `_sort` |
+| token | `code`, `system\|code`, `\|code` | `system\|` (any code), `:not`, `_sort` |
+| date | the value at its stored precision: `birthdate=1974-12-25` | `ge` / `lt` / other prefixes, ranges, `_sort` |
+
+`:missing` isn't supported on blind parameters. Searches stop matching after the blind index key changes, until `reindex()` rewrites the hashes with the new key.
 
 ### Storage layout
 
@@ -263,7 +276,7 @@ Everything lives in its own schema (`fhir` by default, configurable), never mixe
 
 - `fhir."Patient"`: the current version of each resource as JSONB
 - `fhir."Patient_history"`: every version, including delete markers
-- `fhir."Patient_string"`, `_token`, `_date`, `_reference`, `_number`, `_quantity`, `_uri`: search index rows, replaced in the same transaction as each write, removed with the resource
+- `fhir."Patient_string"`, `_token`, `_date`, `_reference`, `_number`, `_quantity`, `_uri`, `_blind` (keyed hashes of `blind` parameters): search index rows, replaced in the same transaction as each write, removed with the resource
 - `fhir."_migrations"`: applied migration ids
 - `fhir."_data_keys"` (with `encryption`): wrapped data keys (never plaintext keys); rows' `enc` and `dek_id` columns hold encrypted bodies, with `content` NULL
 - `fhir."_audit"` (with `audit: { table: true }`): the append-only audit log, one row per operation (no resource content)
@@ -274,7 +287,7 @@ The runtime database role needs `SELECT`, `INSERT` and `UPDATE` on the resource,
 GRANT USAGE ON SCHEMA fhir TO app_runtime;
 GRANT SELECT, INSERT, UPDATE ON fhir."Patient", fhir."Patient_history" TO app_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON fhir."Patient_string", fhir."Patient_token", fhir."Patient_date",
-  fhir."Patient_reference", fhir."Patient_number", fhir."Patient_quantity", fhir."Patient_uri" TO app_runtime;
+  fhir."Patient_reference", fhir."Patient_number", fhir."Patient_quantity", fhir."Patient_uri", fhir."Patient_blind" TO app_runtime;
 GRANT INSERT ON fhir."_audit" TO app_runtime;
 -- With encryption on:
 GRANT SELECT, INSERT ON fhir."_data_keys" TO app_runtime;
@@ -335,11 +348,11 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 - The REST handler (`@fhirforge/http`, both the fetch-style and the Node adapter) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
-- With `encryption`, resource bodies (current and history) are encrypted at rest with your KMS's keys (envelope encryption, AES-256-GCM, ciphertexts bound to their row); search index rows are not, so sensitive parameters should use the `none` policy.
+- With `encryption`, resource bodies (current and history) are encrypted at rest with your KMS's keys (envelope encryption, AES-256-GCM, ciphertexts bound to their row); search index rows are protected per parameter: `blind` (keyed hashes, exact match only) or `none`.
 - `expunge` (off unless enabled) removes a resource's every version and index row in one transaction (history and index rows are copies of PHI), as its own policy-checked operation with a required reason, audited; audit rows are kept. It can run on its own connection, so the everyday runtime role never needs `DELETE` on resource data.
 - The optional audit table records every operation append-only, and writes a change and its audit row in one database transaction, so a committed change always has its record.
 
-What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: blind (keyed-hash) search indexes and a strict mode that refuses plaintext rows once everything is encrypted. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
+What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: a strict mode that refuses plaintext rows once everything is encrypted. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
 
 ## Development
 

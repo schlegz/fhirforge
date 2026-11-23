@@ -13,6 +13,7 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 - **Security:** TLS enforcement for remote `pg` Pools; required `authorize` policy with `as(ctx)` / `asSystem(reason)`; `onAudit`; denied reads hidden as 404; writes pinned to the approved version; errors never echo values.
 - **Runtime validation** (roadmap item 2): rules compiled from the StructureDefinitions into `@fhirforge/r4`'s `validation`, walked by `core/src/validation/`. Checks unknown elements, cardinality, types, choice elements, required `code` bindings, primitive formats and contained resources. `create` / `update` validate before the policy check; 400 with one path-only issue per problem. All 5,293 valid R4 spec examples pass; the 16 that break the base spec are rejected (`pnpm test:examples --no-types <examples package>`).
 - **Release pipeline:** Changesets, `scripts/publish.mjs` with tarball checks, `release.yml` for trusted publishing.
+- **Blind indexes:** the `blind` search policy (HMAC-SHA-256 of normalized values in `<Type>_blind`, app key `encryption.blindIndexKey` with id per row, `reindex()` on rotation); exact match only for string, token and date, everything else a 400. With body encryption and `blind` / `none` policies, the database holds no readable copy of chosen fields.
 - **Encryption at rest (bodies)** ([design/encryption.md](design/encryption.md), defaults accepted): `encryption: { keys }` envelope-encrypts every body, current and history, with AES-256-GCM and app-KMS-wrapped data keys, ciphertexts bound to their row; `reencrypt()` encrypts legacy rows and rotates. Plaintext rows stay readable (mixed mode).
 - **Conditional create, update and delete** ([design/conditional-operations.md](design/conditional-operations.md), defaults accepted): `conditionalCreate` / `conditionalUpdate` / `conditionalDelete`, Bundle `ifNoneExist` and `Type?…` entries, and REST `If-None-Exist` / `PUT Type?…` / `DELETE Type?…`. The condition is searched as the caller; the write re-checks it under an advisory lock (412 if it changed), so concurrent conditional writes with the same condition can't duplicate.
 - **Expunge:** `expunge(type, id, { reason })` removes every version and index row in one transaction, pinned and policy-checked (action `expunge`), with a required reason, audited, audit rows kept. Off unless `createFhirStore({ expunge })` enables it; `expunge: { storage }` runs it on a separate privileged connection so the runtime role never needs `DELETE` on resource data. Not exposed over REST.
@@ -24,9 +25,7 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ## Next, in order
 
-### 1. Blind indexes
-
-The `blind` search policy from [design/encryption.md](design/encryption.md): keyed HMAC hashes of normalized values in a `<Type>_blind` index table (exact match only for string, token and date; the rest is a 400), with an app-supplied key separate from the data keys, and `reindex()` on rotation. Body encryption is done; this is the other half.
+Nothing queued: pick the next item from **Later**.
 
 ## Later
 

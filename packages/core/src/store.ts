@@ -2,7 +2,8 @@ import type { AccessOptions, StoreAuditEvent, AuditOutcome, AuthorizeRequest, St
 import { FhirError } from './errors.js';
 import { extractIndexRows, indexParameter, type SearchPolicy } from './search/index-rows.js';
 import { isChainKey, isIncludeKey, MAX_CHAIN_MATCHES, MAX_INCLUDED, splitLinks } from './search/links.js';
-import { parseSearch, type SearchParams } from './search/query.js';
+import { BLIND_TYPES, blindIndexer } from './search/blind.js';
+import { parseSearch, type SearchParams, type SearchQuery } from './search/query.js';
 import type { SearchParamType } from './search/types.js';
 import {
   atEntry,
@@ -318,11 +319,23 @@ export function createFhirStore<
     if (!type || !code || !allowed.has(type) || !table?.[type]?.some((p) => p.code === code)) {
       throw new Error(`createFhirStore: search policy for unknown parameter ${key}`);
     }
-    if (value === 'blind') throw new Error(`createFhirStore: blind indexing (${key}) is not implemented yet`);
-    if (value !== 'plaintext' && value !== 'none') throw new Error(`createFhirStore: invalid search policy ${String(value)} for ${key}`);
+    if (value === 'blind') {
+      if (!options.encryption?.blindIndexKey) throw new Error(`createFhirStore: ${key} is blind, which needs \`encryption.blindIndexKey\``);
+      const def = table?.[type]?.find((p) => p.code === code);
+      if (!def || !BLIND_TYPES.has(def.type)) throw new Error(`createFhirStore: ${key} can't be blind (only string, token and date parameters)`);
+    } else if (value !== 'plaintext' && value !== 'none') {
+      throw new Error(`createFhirStore: invalid search policy ${String(value)} for ${key}`);
+    }
   }
   const policy = (resourceType: string, code: string): SearchPolicy => policies.get(`${resourceType}.${code}`) ?? 'plaintext';
-  const index: Indexer | undefined = table ? (resource) => extractIndexRows(resource, table, policy) : undefined;
+  const blind = options.encryption?.blindIndexKey && [...policies.values()].includes('blind') ? blindIndexer(options.encryption.blindIndexKey, policy) : undefined;
+  const index: Indexer | undefined = table
+    ? blind
+      ? (resource) => blind.rows(resource.resourceType, extractIndexRows(resource, table, policy))
+      : (resource) => extractIndexRows(resource, table, policy)
+    : undefined;
+  /** Blind parameters are searched by keyed hash; everything else passes through. */
+  const prepare = (query: SearchQuery) => (blind ? blind.query(query) : Promise.resolve(query));
   const writeOptions = index ? { index } : {};
 
   const reindex = async (types: readonly string[]): Promise<Record<string, number>> => {
@@ -571,7 +584,7 @@ export function createFhirStore<
     if (!table) throw FhirError.notSupported(`FHIR ${fhir.fhirVersion} package has no compiled search parameters`);
     const decision = await decide(scope, { action: 'search', resourceType, params: condition });
     if (!decision.allowed) throw forbidden('search', resourceType);
-    const query = parseSearch(resourceType, mergeFilter(condition, decision.filter), table, policy);
+    const query = await prepare(parseSearch(resourceType, mergeFilter(condition, decision.filter), table, policy));
     const page = await ops.search(resourceType, { ...condition, _count: 2 });
     // The canonical form of the parsed clauses: equivalent spellings of a condition share a lock.
     const key = `${resourceType}|${JSON.stringify(query.clauses.map((c) => JSON.stringify(c)).sort())}`;
@@ -789,7 +802,7 @@ export function createFhirStore<
           merged[chain.param] = mine === undefined ? refs : [...(Array.isArray(mine) ? mine : [mine]).map(String), refs];
         }
 
-        const query = parseSearch(resourceType, merged, table, policy);
+        const query = await prepare(parseSearch(resourceType, merged, table, policy));
         const { versions, total } = await storage.search(query);
 
         // Defense in depth: every result must also pass a read check. If any is removed, the

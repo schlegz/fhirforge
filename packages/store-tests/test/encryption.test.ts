@@ -65,7 +65,8 @@ describe('encryption at rest (PGlite, raw rows)', () => {
       { content: null, encrypted: true },
     ]);
     const dump = JSON.stringify(await raw(`SELECT encode(enc, 'escape') AS e FROM $S."Patient_history"`));
-    expect(dump).not.toMatch(/Synthetic|1974/);
+    // Distinctive values only: random ciphertext bytes can spell short strings like "1974".
+    expect(dump).not.toMatch(/Synthetic-Doe|Synthetic-Given|1974-12-25/);
     expect(await raw(`SELECT key_id FROM $S."_data_keys"`)).toEqual([{ key_id: 'test-master-1' }]);
 
     expect(await fhir.read('Patient', p.id)).toEqual(updated);

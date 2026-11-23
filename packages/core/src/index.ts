@@ -39,6 +39,7 @@ export {
 } from './storage.js';
 export type { AnyResource, FhirVersionPackage, HistoryEntry, MigrationResult, ResourceMapOf, SearchResult, Stored } from './types.js';
 export type { CompiledSearchParameter, PathStep, SearchParameterTable, SearchParamType, StepFilter } from './search/types.js';
+export { BLIND_TYPES } from './search/blind.js';
 export { extractIndexRows, indexParameter, evaluatePath, BUILT_IN_PARAMETERS, type IndexRow, type SearchPolicy } from './search/index-rows.js';
 export {
   parseSearch,
