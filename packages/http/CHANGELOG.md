@@ -1,5 +1,12 @@
 # @fhirforge/http
 
+## 0.9.0
+
+### Patch Changes
+
+- Updated dependencies [9a5ff6a]
+  - @fhirforge/core@0.9.0
+
 ## 0.8.0
 
 ### Minor Changes
