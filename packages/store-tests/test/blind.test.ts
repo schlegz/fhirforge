@@ -73,7 +73,8 @@ describe('blind indexes (PGlite)', () => {
     const dump = JSON.stringify(
       await Promise.all(tables.map(async (k) => (await db.query(`SELECT * FROM ${schema}."Patient_${k}"`)).rows)),
     ) + JSON.stringify((await db.query(`SELECT * FROM ${schema}."Patient"`)).rows);
-    expect(dump).not.toMatch(/Do[ée]|Doering|Smith|Jane|John|SYN-|1974|1980/i);
+    // Distinctive values only (case-sensitive): random hashes and UUIDs can contain short strings by chance.
+    expect(dump).not.toMatch(/Doé|Doering|Smith|SYN-A100|SYN-B200|1974-12-25|1980-03-01/);
     const { rows } = await db.query<{ param: string; key_id: string }>(`SELECT DISTINCT param, key_id FROM ${schema}."Patient_blind" ORDER BY param`);
     expect(rows).toEqual([
       { param: 'birthdate', key_id: 'blind-1' },

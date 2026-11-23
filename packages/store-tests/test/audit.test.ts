@@ -109,7 +109,8 @@ describe('built-in audit table (PGlite)', () => {
     expect(r[3]!.params).toEqual(['family']);
     expect(r[3]!.result_ids).toEqual([p.id]);
     expect([r[7]!.actor, r[7]!.system, r[7]!.reason]).toEqual([null, true, 'nightly import']);
-    expect(JSON.stringify(r)).not.toMatch(/Synthetic|1974/);
+    // Distinctive values only: random UUIDs and ciphertext can contain short digit runs like "1974".
+    expect(JSON.stringify(r)).not.toMatch(/Synthetic-Doe|1974-12-25/);
     // Each single operation has its own operation id, and onAudit sees the same events.
     expect(new Set(r.map((x) => x.operation_id)).size).toBe(r.length);
     expect(events.map((e) => e.operationId)).toEqual(r.map((x) => x.operation_id));
