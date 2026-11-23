@@ -33,12 +33,18 @@ export interface KeyProvider {
 
 export interface EncryptionOptions {
   keys: KeyProvider;
-  /** A data key encrypts new versions for at most this long. Default 5 minutes. */
+  /** A data key encrypts new versions for at most this long. Default 5 minutes, at most 24 hours. */
   dataKeyMaxAgeMs?: number;
   /** ...or at most this many encryptions, whichever comes first. Default 100,000. */
   dataKeyMaxUses?: number;
   /** Unwrapped data keys kept in memory for reads. Default 1,000. */
   dataKeyCacheSize?: number;
+  /**
+   * Refuse plaintext bodies on read (they're an error, not data). Turn it on once
+   * `reencrypt()` returns 0 for every type: then nobody with write access to the database
+   * can substitute plaintext for a ciphertext. `reencrypt()` itself still reads plaintext.
+   */
+  requireEncrypted?: boolean;
   /**
    * The key for `blind` search parameters (HMAC-SHA-256, at least 32 bytes): a separate secret
    * from the data keys, e.g. from your secrets manager. Its `id` is stored on each blind index
@@ -46,6 +52,11 @@ export interface EncryptionOptions {
    */
   blindIndexKey?: () => Promise<{ id: string; key: Uint8Array }>;
 }
+
+/** Longest data key window: `removeUnusedDataKeys` relies on no process writing with a key older than this. */
+export const MAX_DATA_KEY_AGE_MS = 24 * 60 * 60 * 1000;
+/** Data keys younger than this are never removed (twice the longest window). */
+export const DATA_KEY_RETENTION_MS = 2 * MAX_DATA_KEY_AGE_MS;
 
 /** Format byte of an encrypted body: AES-256-GCM, 96-bit nonce, 128-bit tag. */
 const FORMAT_AES_GCM = 1;
@@ -180,6 +191,10 @@ export function encryptedStorage(inner: FhirStorage, options: EncryptionOptions)
   if (!options || typeof options.keys?.wrap !== 'function' || typeof options.keys?.unwrap !== 'function') {
     throw new Error('createFhirStore: `encryption.keys` must be a KeyProvider with wrap() and unwrap()');
   }
+  const maxAge = options.dataKeyMaxAgeMs;
+  if (maxAge !== undefined && (!Number.isFinite(maxAge) || maxAge <= 0 || maxAge > MAX_DATA_KEY_AGE_MS)) {
+    throw new Error('createFhirStore: `encryption.dataKeyMaxAgeMs` must be between 1 ms and 24 hours');
+  }
   const keyring = new Keyring(options.keys, options);
 
   const seal: Sealer = async (resource) => {
@@ -200,7 +215,8 @@ export function encryptedStorage(inner: FhirStorage, options: EncryptionOptions)
     return { enc: toBase64(bytes), dekId: dek.id, keyId: dek.keyId, wrapped: dek.wrapped };
   };
 
-  const open: Opener = async (v) => {
+  /** Decrypts; plaintext bodies pass through (mixed mode, and what `reencrypt` needs). */
+  const openAny: Opener = async (v) => {
     if (!v.sealed) return v;
     const { resourceType, id, enc, dekId, key: known } = v.sealed;
     try {
@@ -219,6 +235,16 @@ export function encryptedStorage(inner: FhirStorage, options: EncryptionOptions)
       // Never include key material or ciphertext; the type and id are fine (CLAUDE.md §1).
       throw new Error(`fhirforge: could not decrypt ${resourceType}/${id}`, { cause: err });
     }
+  };
+  /** Decrypts; with `requireEncrypted`, a plaintext body is an error. */
+  const open: Opener = async (v) => {
+    if (!v.sealed && v.resource && options.requireEncrypted) {
+      // Type and id only: never the content (CLAUDE.md §1).
+      throw new Error(
+        `fhirforge: ${v.resource.resourceType}/${v.resource.id} is stored in plaintext, but encryption.requireEncrypted is on (run reencrypt())`,
+      );
+    }
+    return openAny(v);
   };
   const openAll = (versions: StoredVersion[]) => Promise.all(versions.map(open));
   const maybe = async (v: StoredVersion | undefined) => (v ? open(v) : undefined);
@@ -246,6 +272,6 @@ export function encryptedStorage(inner: FhirStorage, options: EncryptionOptions)
       return { versions: await openAll(versions), total };
     },
     reindex: (type, index, o) => inner.reindex(type, index, { ...o, open }),
-    reencrypt: (type, o) => inner.reencrypt(type, { ...o, open, seal, prepare: () => keyring.prepare() }),
+    reencrypt: (type, o) => inner.reencrypt(type, { ...o, open: openAny, seal, prepare: () => keyring.prepare() }),
   };
 }
