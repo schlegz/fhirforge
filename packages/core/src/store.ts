@@ -31,6 +31,7 @@ import type {
   WriteCondition,
 } from './storage.js';
 import { createValidator } from './validation/validate.js';
+import { encryptedStorage, type EncryptionOptions } from './encryption.js';
 import type {
   AnyResource,
   FhirVersionPackage,
@@ -56,6 +57,13 @@ export interface CreateFhirStoreOptions<V extends FhirVersionPackage<unknown>, K
    * role never needs `DELETE` on resource data. Without it, the main storage is used.
    */
   expunge?: { storage?: FhirStorage };
+  /**
+   * Encryption at rest for resource bodies (current and history): envelope encryption with
+   * data keys wrapped by your KMS (`keys`), AES-256-GCM. Search index rows are not encrypted:
+   * give sensitive parameters the `none` (or, later, `blind`) search policy. Existing plaintext
+   * rows stay readable; `reencrypt()` encrypts them.
+   */
+  encryption?: EncryptionOptions;
   search?: {
     /**
      * How each search parameter is indexed, keyed `ResourceType.code`
@@ -190,6 +198,13 @@ export interface FhirStore<M, Ctx = unknown> extends FhirDataOperations<M> {
   /** Creates or upgrades storage for the configured resource types. Safe to run on every startup. */
   migrate(): Promise<MigrationResult>;
 
+  /**
+   * Re-encrypts stored bodies (current and history): plaintext ones, and with `olderThan`
+   * those under data keys created before it (key rotation). One resource per transaction.
+   * Needs the `encryption` option. Returns how many resources were rewritten, per type.
+   */
+  reencrypt<RT extends keyof M & string>(options?: { resourceType?: RT; olderThan?: Date }): Promise<Record<string, number>>;
+
   /** Rebuilds search indexes (all configured types, or one). Run after changing the search policy. */
   reindex<RT extends keyof M & string>(resourceType?: RT): Promise<Record<string, number>>;
 }
@@ -246,7 +261,11 @@ export function createFhirStore<
   const K extends keyof ResourceMapOf<V> & string,
   Ctx = unknown,
 >(options: CreateFhirStoreOptions<V, K, Ctx>): FhirStore<Pick<ResourceMapOf<V>, K>, Ctx> {
-  const { storage, fhir, authorize, onAudit, onAuditError } = options;
+  const { fhir, authorize, onAudit, onAuditError } = options;
+  // Encryption at rest wraps the storage: bodies are sealed on write and opened on read.
+  const storage = options.encryption ? encryptedStorage(options.storage, options.encryption) : options.storage;
+  const expungeStorage =
+    options.expunge?.storage && options.encryption ? encryptedStorage(options.expunge.storage, options.encryption) : options.expunge?.storage;
   if (options.expunge !== undefined) {
     const extra = options.expunge.storage;
     if (extra !== undefined && typeof extra?.expunge !== 'function') {
@@ -714,7 +733,7 @@ export function createFhirStore<
         const current = versions[0]!.versionId;
         const requested = normalizeVersion(expungeOptions?.ifMatch);
         // Runs on the expunge storage when configured (a role with DELETE), in one transaction there.
-        const removed = await (options.expunge.storage ?? storage).expunge(resourceType, id, { ifMatch: requested ?? current, ...withRows({}) });
+        const removed = await (expungeStorage ?? storage).expunge(resourceType, id, { ifMatch: requested ?? current, ...withRows({}) });
         if (!removed) throw FhirError.notFound(resourceType, id); // expunged concurrently
         return { result: undefined, versionId: requested ?? current, persisted: auditTable };
       });
@@ -1209,6 +1228,15 @@ export function createFhirStore<
       const { applied, reindex: needsReindex } = await storage.migrate(resourceTypes, { audit: auditTable });
       if (!needsReindex?.length) return { applied };
       return { applied, reindexed: await reindex(needsReindex) };
+    },
+    async reencrypt(reencryptOptions = {}) {
+      if (!options.encryption) throw new Error('reencrypt: the store has no `encryption` option');
+      const types = reencryptOptions.resourceType !== undefined ? [checkType(reencryptOptions.resourceType)] : resourceTypes;
+      const olderThan = reencryptOptions.olderThan?.toISOString();
+      const out: Record<string, number> = {};
+      // The wrapped storage fills in open and seal.
+      for (const t of types) out[t] = await storage.reencrypt(t, { open: (v) => Promise.resolve(v), seal: undefined as never, ...(olderThan ? { olderThan } : {}) });
+      return out;
     },
     async reindex(resourceType) {
       if (resourceType !== undefined) checkType(resourceType);

@@ -5,7 +5,9 @@ import {
   type AuditRow,
   type FhirStorage,
   type Indexer,
+  type Opener,
   type PendingAuditRow,
+  type Sealer,
   type WriteCondition,
   type PlannedWrite,
   type StoredVersion,
@@ -28,7 +30,12 @@ interface Row {
   last_updated: Date | string;
   deleted: boolean;
   content: (AnyResource & { id: string }) | string | null;
+  enc?: string | null;
+  dek_id?: string | null;
 }
+
+/** The columns every version query selects (encrypted bodies as base64). */
+const COLS = `version_id::text AS v, last_updated, deleted, content, encode(enc, 'base64') AS enc, dek_id::text AS dek_id`;
 
 /**
  * FHIR storage on Postgres. Pass a `pg` Pool or any `Database`
@@ -61,14 +68,33 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     }
   };
 
-  const toVersion = (row: Row): StoredVersion => {
+  const toVersion = (row: Row, resourceType: string, id: string): StoredVersion => {
+    const base = { versionId: String(row.v), lastUpdated: new Date(row.last_updated).toISOString(), deleted: row.deleted };
+    // Encrypted: core opens it (the adapter never sees keys).
+    if (row.enc && row.dek_id) return { ...base, resource: null, sealed: { resourceType, id, enc: row.enc, dekId: row.dek_id } };
     const content = typeof row.content === 'string' ? (JSON.parse(row.content) as Row['content']) : row.content;
-    return {
-      versionId: String(row.v),
-      lastUpdated: new Date(row.last_updated).toISOString(),
-      deleted: row.deleted,
-      resource: (content as StoredVersion['resource']) ?? null,
-    };
+    return { ...base, resource: (content as StoredVersion['resource']) ?? null };
+  };
+
+  /** Data keys this adapter instance already stored, so each is inserted once. */
+  const knownKeys = new Set<string>();
+  const dataKeysTable = `${ident(schema)}."_data_keys"`;
+  /** Attaches the wrapped data key to an encrypted version, read on `tx` (so opening it needs no other connection). */
+  const withKey = async (tx: SqlClient, v: StoredVersion): Promise<StoredVersion> => {
+    if (!v.sealed || v.sealed.key) return v;
+    const { rows } = await tx.query<{ key_id: string; wrapped: string }>(
+      `SELECT key_id, encode(wrapped, 'base64') AS wrapped FROM ${dataKeysTable} WHERE id = $1::uuid`,
+      [v.sealed.dekId],
+    );
+    return rows[0] ? { ...v, sealed: { ...v.sealed, key: { keyId: rows[0].key_id, wrapped: rows[0].wrapped } } } : v;
+  };
+  const storeDataKey = async (tx: SqlClient, sealed: { dekId: string; keyId: string; wrapped: string }) => {
+    if (knownKeys.has(sealed.dekId)) return;
+    await tx.query(
+      `INSERT INTO ${dataKeysTable} (id, key_id, wrapped) VALUES ($1::uuid, $2, decode($3, 'base64')) ON CONFLICT (id) DO NOTHING`,
+      [sealed.dekId, sealed.keyId, sealed.wrapped],
+    );
+    knownKeys.add(sealed.dekId);
   };
 
   /** Locks the current row (if any) for the rest of the transaction. */
@@ -90,28 +116,36 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     resource: (AnyResource & { id: string }) | null,
     insert: boolean,
     index: Indexer | undefined,
+    seal?: Sealer,
   ): Promise<StoredVersion> => {
     const t = tablesFor(schema, resourceType);
     const lastUpdated = new Date().toISOString();
     const stamped = resource ? stampMeta(resource, String(versionId), lastUpdated) : null;
-    const content = stamped ? JSON.stringify(stamped) : null;
     const deleted = resource === null;
+    // With encryption, the body goes into `enc` and `content` stays NULL.
+    const sealed = stamped && seal ? await seal(stamped) : undefined;
+    if (sealed) await storeDataKey(tx, sealed);
+    const content = stamped && !sealed ? JSON.stringify(stamped) : null;
+    const enc = sealed?.enc ?? null;
+    const dekId = sealed?.dekId ?? null;
     if (insert) {
       const { rows } = await tx.query(
-        `INSERT INTO ${t.current} (id, version_id, last_updated, deleted, content)
-         VALUES ($1, $2, $3, $4, $5::jsonb) ON CONFLICT (id) DO NOTHING RETURNING id`,
-        [id, versionId, lastUpdated, deleted, content],
+        `INSERT INTO ${t.current} (id, version_id, last_updated, deleted, content, enc, dek_id)
+         VALUES ($1, $2, $3, $4, $5::jsonb, decode($6, 'base64'), $7::uuid) ON CONFLICT (id) DO NOTHING RETURNING id`,
+        [id, versionId, lastUpdated, deleted, content, enc, dekId],
       );
       if (rows.length === 0) throw FhirError.duplicate(resourceType, id);
     } else {
       await tx.query(
-        `UPDATE ${t.current} SET version_id = $2, last_updated = $3, deleted = $4, content = $5::jsonb WHERE id = $1`,
-        [id, versionId, lastUpdated, deleted, content],
+        `UPDATE ${t.current} SET version_id = $2, last_updated = $3, deleted = $4, content = $5::jsonb,
+           enc = decode($6, 'base64'), dek_id = $7::uuid WHERE id = $1`,
+        [id, versionId, lastUpdated, deleted, content, enc, dekId],
       );
     }
     await tx.query(
-      `INSERT INTO ${t.history} (id, version_id, last_updated, deleted, content) VALUES ($1, $2, $3, $4, $5::jsonb)`,
-      [id, versionId, lastUpdated, deleted, content],
+      `INSERT INTO ${t.history} (id, version_id, last_updated, deleted, content, enc, dek_id)
+       VALUES ($1, $2, $3, $4, $5::jsonb, decode($6, 'base64'), $7::uuid)`,
+      [id, versionId, lastUpdated, deleted, content, enc, dekId],
     );
     // Search index rows are replaced in the same transaction, so a search never sees a stale index.
     if (stamped && index) await writeIndexRows(tx, t, id, index(stamped));
@@ -186,6 +220,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     resource: AnyResource & { id: string },
     guard: { ifMatch?: string; ifNoneExist?: boolean },
     index: Indexer | undefined,
+    seal?: Sealer,
   ): Promise<UpdateResult> => {
     const { resourceType, id } = resource;
     const current = await lockCurrent(tx, resourceType, id);
@@ -196,9 +231,9 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       throw FhirError.versionConflict(resourceType, id, 'none', current.v);
     }
     if (!current) {
-      return { version: await writeVersion(tx, resourceType, id, 1, resource, true, index), created: true };
+      return { version: await writeVersion(tx, resourceType, id, 1, resource, true, index, seal), created: true };
     }
-    const version = await writeVersion(tx, resourceType, id, Number(current.v) + 1, resource, false, index);
+    const version = await writeVersion(tx, resourceType, id, Number(current.v) + 1, resource, false, index, seal);
     return { version, created: current.deleted };
   };
 
@@ -216,14 +251,14 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     return writeVersion(tx, resourceType, id, Number(current.v) + 1, null, false, undefined);
   };
 
-  const applyWrite = async (tx: SqlClient, write: PlannedWrite, index: Indexer | undefined): Promise<WriteResult> => {
+  const applyWrite = async (tx: SqlClient, write: PlannedWrite, index: Indexer | undefined, seal?: Sealer): Promise<WriteResult> => {
     switch (write.kind) {
       case 'create': {
         const { resource } = write;
-        return { kind: 'create', version: await writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, index) };
+        return { kind: 'create', version: await writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, index, seal) };
       }
       case 'update':
-        return { kind: 'update', result: await applyUpdate(tx, write.resource, write, index) };
+        return { kind: 'update', result: await applyUpdate(tx, write.resource, write, index, seal) };
       case 'delete':
         return { kind: 'delete', version: await applyDelete(tx, write.resourceType, write.id, write.ifMatch) };
     }
@@ -235,7 +270,10 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
 
   return {
     async migrate(resourceTypes, migrateOptions = {}) {
-      const migrations = migrationsFor(schema, resourceTypes, { audit: migrateOptions.audit === true });
+      const migrations = migrationsFor(schema, resourceTypes, {
+        audit: migrateOptions.audit === true,
+        encryption: migrateOptions.encryption === true,
+      });
       return database.transaction(async (tx) => {
         // Serialize concurrent migrations (several app instances starting at once).
         // The lock is released automatically at COMMIT or ROLLBACK.
@@ -260,7 +298,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       return run(resource.resourceType, () =>
         database.transaction(async (tx) => {
           await checkCondition(tx, opts.condition);
-          const version = await writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, opts.index);
+          const version = await writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, opts.index, opts.seal);
           await insertAudit(tx, withVersion(opts.audit, version));
           return version;
         }),
@@ -271,7 +309,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       return run(resource.resourceType, () =>
         database.transaction(async (tx) => {
           await checkCondition(tx, opts.condition);
-          const result = await applyUpdate(tx, resource, opts, opts.index);
+          const result = await applyUpdate(tx, resource, opts, opts.index, opts.seal);
           await insertAudit(tx, withVersion(opts.audit, result.version));
           return result;
         }),
@@ -333,7 +371,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
           // before any write of this transaction changes what they'd match.
           const conditions = writes.flatMap((w) => (w.condition ? [w.condition] : [])).sort((a, b) => compare(a.key, b.key));
           for (const c of conditions) await checkCondition(tx, c);
-          for (const { w, i } of order) results[i] = await applyWrite(tx, w, opts.index);
+          for (const { w, i } of order) results[i] = await applyWrite(tx, w, opts.index, opts.seal);
           const versionOf = (n: number | undefined) => {
             const r = n === undefined ? undefined : results[n];
             return r?.kind === 'update' ? r.result.version : r?.version;
@@ -354,10 +392,10 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       const t = tablesFor(schema, resourceType);
       return run(resourceType, async () => {
         const { rows } = await database.query<Row>(
-          `SELECT version_id::text AS v, last_updated, deleted, content FROM ${t.current} WHERE id = $1`,
+          `SELECT ${COLS} FROM ${t.current} WHERE id = $1`,
           [id],
         );
-        return rows[0] ? toVersion(rows[0]) : undefined;
+        return rows[0] ? toVersion(rows[0], resourceType, id) : undefined;
       });
     },
 
@@ -366,21 +404,18 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       const t = tablesFor(schema, resourceType);
       return run(resourceType, async () => {
         const { rows } = await database.query<Row>(
-          `SELECT version_id::text AS v, last_updated, deleted, content FROM ${t.history} WHERE id = $1 AND version_id = $2`,
+          `SELECT ${COLS} FROM ${t.history} WHERE id = $1 AND version_id = $2`,
           [id, versionId],
         );
-        return rows[0] ? toVersion(rows[0]) : undefined;
+        return rows[0] ? toVersion(rows[0], resourceType, id) : undefined;
       });
     },
 
     history(resourceType, id) {
       const t = tablesFor(schema, resourceType);
       return run(resourceType, async () => {
-        const { rows } = await database.query<Row>(
-          `SELECT version_id::text AS v, last_updated, deleted, content FROM ${t.history} WHERE id = $1 ORDER BY version_id DESC`,
-          [id],
-        );
-        return rows.map(toVersion);
+        const { rows } = await database.query<Row>(`SELECT ${COLS} FROM ${t.history} WHERE id = $1 ORDER BY version_id DESC`, [id]);
+        return rows.map((row) => toVersion(row, resourceType, id));
       });
     },
 
@@ -388,11 +423,11 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       const t = tablesFor(schema, query.resourceType);
       return run(query.resourceType, async () => {
         const { rows, total } = await runSearch(database, t, query);
-        return { versions: rows.map((r) => toVersion(r as unknown as Row)), total };
+        return { versions: rows.map((r) => toVersion(r as unknown as Row, query.resourceType, r.id)), total };
       });
     },
 
-    reindex(resourceType, index) {
+    reindex(resourceType, index, reindexOptions = {}) {
       const t = tablesFor(schema, resourceType);
       return run(resourceType, async () => {
         let count = 0;
@@ -406,15 +441,78 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
           for (const { id } of rows) {
             // One short transaction per resource, with the row locked, so concurrent writes are never overwritten.
             await database.transaction(async (tx) => {
-              const { rows: locked } = await tx.query<Row>(
-                `SELECT version_id::text AS v, last_updated, deleted, content FROM ${t.current} WHERE id = $1 FOR UPDATE`,
-                [id],
-              );
-              const v = locked[0] ? toVersion(locked[0]) : undefined;
+              const { rows: locked } = await tx.query<Row>(`SELECT ${COLS} FROM ${t.current} WHERE id = $1 FOR UPDATE`, [id]);
+              let v = locked[0] ? toVersion(locked[0], resourceType, id) : undefined;
+              if (v?.sealed) {
+                if (!reindexOptions.open) throw new Error(`fhirforge: ${resourceType}/${id} is encrypted; reindex needs the store's encryption settings`);
+                v = await reindexOptions.open(await withKey(tx, v));
+              }
               if (v?.resource && !v.deleted) {
                 await writeIndexRows(tx, t, id, index(v.resource));
                 count++;
               }
+            });
+          }
+          after = rows[rows.length - 1]!.id;
+        }
+      });
+    },
+
+    dataKeys(ids) {
+      if (ids.length === 0) return Promise.resolve([]);
+      return run('_data_keys', async () => {
+        const { rows } = await database.query<{ id: string; key_id: string; wrapped: string }>(
+          `SELECT id::text AS id, key_id, encode(wrapped, 'base64') AS wrapped FROM ${dataKeysTable} WHERE id = ANY($1::uuid[])`,
+          [[...ids]],
+        );
+        return rows.map((r) => ({ id: r.id, keyId: r.key_id, wrapped: r.wrapped }));
+      });
+    },
+
+    reencrypt(resourceType, opts) {
+      const t = tablesFor(schema, resourceType);
+      // Rows to rewrite: plaintext bodies, or bodies under a data key older than `olderThan`.
+      const stale = opts.olderThan
+        ? `((enc IS NULL AND content IS NOT NULL) OR dek_id IN (SELECT id FROM ${dataKeysTable} WHERE created < $2::timestamptz))`
+        : `(enc IS NULL AND content IS NOT NULL)`;
+      const extra = opts.olderThan ? [opts.olderThan] : [];
+      return run(resourceType, async () => {
+        let count = 0;
+        let after = '';
+        for (;;) {
+          const { rows } = await database.query<{ id: string }>(
+            `SELECT DISTINCT id FROM ${t.history} WHERE id > $1 AND ${stale} ORDER BY id LIMIT 500`,
+            [after, ...extra],
+          );
+          if (rows.length === 0) return count;
+          for (const { id } of rows) {
+            await opts.prepare?.(); // a fresh data key if the window ran out (outside the transaction)
+            // One resource per transaction, with its current row locked, so writes can't interleave.
+            await database.transaction(async (tx) => {
+              const { rows: current } = await tx.query<{ v: string }>(
+                `SELECT version_id::text AS v FROM ${t.current} WHERE id = $1 FOR UPDATE`,
+                [id],
+              );
+              if (!current[0]) return; // expunged meanwhile
+              const { rows: versions } = await tx.query<Row>(`SELECT ${COLS} FROM ${t.history} WHERE id = $1 AND ${stale}`, [id, ...extra]);
+              for (const row of versions) {
+                const v = await opts.open(await withKey(tx, toVersion(row, resourceType, id)));
+                if (!v.resource || v.deleted) continue;
+                const sealed = await opts.seal(v.resource as Parameters<typeof opts.seal>[0]);
+                await storeDataKey(tx, sealed);
+                const params = [id, v.versionId, sealed.enc, sealed.dekId];
+                await tx.query(
+                  `UPDATE ${t.history} SET content = NULL, enc = decode($3, 'base64'), dek_id = $4::uuid WHERE id = $1 AND version_id = $2`,
+                  params,
+                );
+                if (v.versionId === current[0].v) {
+                  await tx.query(
+                    `UPDATE ${t.current} SET content = NULL, enc = decode($3, 'base64'), dek_id = $4::uuid WHERE id = $1 AND version_id = $2`,
+                    params,
+                  );
+                }
+              }
+              count++;
             });
           }
           after = rows[rows.length - 1]!.id;

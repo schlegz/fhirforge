@@ -13,6 +13,7 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 - **Security:** TLS enforcement for remote `pg` Pools; required `authorize` policy with `as(ctx)` / `asSystem(reason)`; `onAudit`; denied reads hidden as 404; writes pinned to the approved version; errors never echo values.
 - **Runtime validation** (roadmap item 2): rules compiled from the StructureDefinitions into `@fhirforge/r4`'s `validation`, walked by `core/src/validation/`. Checks unknown elements, cardinality, types, choice elements, required `code` bindings, primitive formats and contained resources. `create` / `update` validate before the policy check; 400 with one path-only issue per problem. All 5,293 valid R4 spec examples pass; the 16 that break the base spec are rejected (`pnpm test:examples --no-types <examples package>`).
 - **Release pipeline:** Changesets, `scripts/publish.mjs` with tarball checks, `release.yml` for trusted publishing.
+- **Encryption at rest (bodies)** ([design/encryption.md](design/encryption.md), defaults accepted): `encryption: { keys }` envelope-encrypts every body, current and history, with AES-256-GCM and app-KMS-wrapped data keys, ciphertexts bound to their row; `reencrypt()` encrypts legacy rows and rotates. Plaintext rows stay readable (mixed mode).
 - **Conditional create, update and delete** ([design/conditional-operations.md](design/conditional-operations.md), defaults accepted): `conditionalCreate` / `conditionalUpdate` / `conditionalDelete`, Bundle `ifNoneExist` and `Type?…` entries, and REST `If-None-Exist` / `PUT Type?…` / `DELETE Type?…`. The condition is searched as the caller; the write re-checks it under an advisory lock (412 if it changed), so concurrent conditional writes with the same condition can't duplicate.
 - **Expunge:** `expunge(type, id, { reason })` removes every version and index row in one transaction, pinned and policy-checked (action `expunge`), with a required reason, audited, audit rows kept. Off unless `createFhirStore({ expunge })` enables it; `expunge: { storage }` runs it on a separate privileged connection so the runtime role never needs `DELETE` on resource data. Not exposed over REST.
 - **Chained search and `_include` / `_revinclude`** ([design/search-links.md](design/search-links.md)): one chain level, resolved as a policy-checked search on the target type; includes as policy-checked reads and searches; limits on chains, chain matches, include parameters and included resources. The REST handler returns includes as `include` entries and advertises `searchInclude` / `searchRevInclude`.
@@ -23,9 +24,9 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ## Next, in order
 
-### 1. Field-level encryption and blind indexes
+### 1. Blind indexes
 
-Envelope encryption of resource bodies (app-supplied KMS keys, AES-256-GCM, key ids on rows) and the `blind` search policy (keyed hashes, exact match only). Design draft for review: [design/encryption.md](design/encryption.md).
+The `blind` search policy from [design/encryption.md](design/encryption.md): keyed HMAC hashes of normalized values in a `<Type>_blind` index table (exact match only for string, token and date; the rest is a 400), with an app-supplied key separate from the data keys, and `reindex()` on rotation. Body encryption is done; this is the other half.
 
 ## Later
 
@@ -33,6 +34,7 @@ Envelope encryption of resource bodies (app-supplied KMS keys, AES-256-GCM, key 
 - **REST follow-ups:** `PATCH`, conditional reads (`If-None-Match`, `If-Modified-Since`), `Prefer: return=minimal`, `HEAD`, type- and system-level history and search, `_summary` / `_elements`, XML. `PUT` re-creating a deleted resource returns 200 instead of 201 (the store's `update` doesn't report `created`).
 - **Bundle follow-ups:** conditional references in transactions (`"reference": "Patient?identifier=…"`), `PATCH` entries, absolute request URLs, `prefer` return modes, and `next` links for search entries.
 - **Audit table follow-ups:** tamper evidence (hash chain, or export to an external append-only store), a helper for monthly partitions, and a read API for auditors (a separate role, never the runtime store).
+- **Strict encryption mode:** once `reencrypt()` has run, refuse plaintext rows on read, so a database writer can't substitute plaintext for a ciphertext.
 - **Profiles:** generated US Core types and profile validation.
 - **Validation gaps:** invariants (FHIRPath constraints; would need a compiled subset like search, never a runtime evaluator), reference target types (the TS types already check them), required bindings on `Coding` / `CodeableConcept` (needs system + code expansions), and value sets that can't be expanded offline (mimetypes, currencies). `unvalidatedBindings` in `@fhirforge/r4` lists the bindings.
 - **Full examples type-check:** 32 of 5,309 official R4 examples fail `pnpm test:examples` type-checking, because the types are stricter than the base spec (reference targets, a primitive's value required next to its `_extension`). Decide whether to relax the types or keep a known-failures list like the runtime check.

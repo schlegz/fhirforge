@@ -36,8 +36,10 @@ describe.each(backends)('createFhirStore on $name', (backend) => {
     expect(first.applied).toEqual([
       'resource:Observation:1',
       'resource:Observation:2',
+      'resource:Observation:3',
       'resource:Patient:1',
       'resource:Patient:2',
+      'resource:Patient:3',
     ]);
     expect(first.reindexed).toEqual({ Observation: 0, Patient: 0 });
     expect(await store.migrate()).toEqual({ applied: [] });
@@ -49,8 +51,10 @@ describe.each(backends)('createFhirStore on $name', (backend) => {
     expect(results.flatMap((r) => r.applied).sort()).toEqual([
       'resource:Observation:1',
       'resource:Observation:2',
+      'resource:Observation:3',
       'resource:Patient:1',
       'resource:Patient:2',
+      'resource:Patient:3',
     ]);
   });
 
