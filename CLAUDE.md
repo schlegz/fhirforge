@@ -45,6 +45,7 @@ fhirforge/
 │                                              audit.test.ts (audit table, atomicity, append-only, runtime-role grants),
 │                                              links.test.ts (chained search, _include / _revinclude, policy, limits),
 │                                              expunge.test.ts (expunge, pinning, audit rows kept, grants),
+│                                              conditional.test.ts (conditional create/update/delete, races, Bundles),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -176,6 +177,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | Search limits: `_count` ≤ 1000, ≤ 100 values per parameter, ≤ 50 clauses, `_offset` ≤ 100000 | In place |
 | REST handler (`@fhirforge/http`, fetch-style and `toNodeHandler`): caller context required (401), generic 500s, `Cache-Control: no-store`, body limit (413), JSON only | In place (tested in `http.test.ts`) |
 | Chained search and `_include` / `_revinclude`: chains run as policy-checked searches on the target type; each include is a policy-checked read; one chain level, ≤ 3 chains, ≤ 100 chain matches, ≤ 5 includes, ≤ 100 included | In place (tested in `links.test.ts`) |
+| Conditional create / update / delete: condition searched as the caller (policy, audit); re-checked under a `pg_advisory_xact_lock` on the canonical condition in the write transaction (412 if it changed); ≤ 10 condition parameters | In place (tested in `conditional.test.ts`, including concurrent creates) |
 | Bundle transactions: all writes in one database transaction (`writeAll`, rows locked in a fixed order); every entry validated, authorized, pinned and audited; ≤ 100 entries, ≤ 10 searches | In place (tested in `bundle.test.ts`) |
 | `authorize` policy (required; `'allow-all'` is the explicit opt-out), `store.as(ctx)`, `store.asSystem(reason)` | In place |
 | Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
@@ -250,6 +252,7 @@ How it works now (`core/src/store.ts`, `core/src/access.ts`); keep these propert
 - The audit table (`audit: { table: true, actor }`): successful writes pass their rows to the storage write (`withRows` in `audited`, `pendingRows` for Bundles), so data and audit commit together; reads and failures go through `storage.recordAudit`. Table failures are never swallowed (`onAuditError` doesn't apply to them). Rows hold the event's fields plus `actor` from the app's mapping: never store `ctx`, content, search values or error messages. A Bundle's entries share the Bundle's `operationId`. fhirforge never deletes audit rows, and expunge (later) must not either.
 - `migrate()` and `reindex()` are maintenance operations on the store and are not audited. Don't expose resource data through them.
 - New data operations (new HTTP adapters, `_has`, deeper chains) must go through the same scope, policy and audit path.
+- Conditional writes (`conditionalCreate` / `conditionalUpdate` / `conditionalDelete`, Bundle `ifNoneExist` and `Type?…` entries): the condition is searched through `ops.search` as the caller, never unfiltered. The write carries a `WriteCondition` (the parsed condition plus the policy's search filter) that the adapter re-checks under an advisory lock on the canonical condition inside the write transaction; keep it that way for new conditional paths, and never put the condition's key or query (search values) in an error or log. One match on a conditional create returns that resource (its read was the condition's search) and writes nothing.
 - Chains and includes (`core/src/search/links.ts`, `store.ts` search): a chained parameter is resolved by a search on the target type through `ops.search` (policy filter, read check, audit), never by a SQL join across resource types: a join would let callers test facts about resources they can't read. An `_include`d resource goes through `ops.read`, a `_revinclude` through `ops.search`; denied or missing targets are left out silently. Policy filters can't contain chains or includes. Keep the result explicit when a limit cuts includes off (`includeLimitReached`), and a 400 (never a partial result) when a chain matches too much.
 
 ### 8. Test data and fixtures

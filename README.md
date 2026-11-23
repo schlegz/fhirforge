@@ -125,10 +125,31 @@ result.entry[0].response; // { status: '201 Created', location: 'Patient/…/_hi
 - **`transaction`** commits every write or none. `urn:uuid:` references between entries are resolved to the new ids before the policy sees them, and are stored resolved. Entries run in FHIR's order (DELETE, POST, PUT, then GET), and the response lists them in request order. The first failure throws, with the entry index in the message (`entry[1]: Not allowed to create Observation`), and nothing is written.
 - **`batch`** runs each entry as an independent single operation. A failing entry gets its status and OperationOutcome in its own `response`; the others still run. Batch entries can't reference each other (use a transaction).
 - **Same checks as single operations:** every entry is validated, checked by `authorize` with the content it touches, pinned to the approved version, and audited as its own event, plus one `transaction` / `batch` event for the Bundle (with the entry count). If any resource changes between the policy check and the commit, the whole transaction fails with 412.
-- **Supported entries:** `POST Type`, `PUT Type/id` (with `ifMatch`), `DELETE Type/id` (with `ifMatch`), `GET Type/id`, `GET Type/id/_history/v` and `GET Type?params`, with relative URLs. GET entries in a transaction run after the commit, see its writes, and report a failure in their own entry (it can't undo the commit). Not supported yet (400): `PATCH`, conditional operations (`ifNoneExist`, `ifNoneMatch`, `ifModifiedSince`, `PUT Type?…`) and absolute URLs.
+- **Supported entries:** `POST Type`, `PUT Type/id` (with `ifMatch`), `DELETE Type/id` (with `ifMatch`), `GET Type/id`, `GET Type/id/_history/v` and `GET Type?params`, with relative URLs. GET entries in a transaction run after the commit, see its writes, and report a failure in their own entry (it can't undo the commit). Conditional entries work too: `ifNoneExist` on POST, and `PUT Type?…` / `DELETE Type?…` (see [Conditional operations](#conditional-operations)); in a transaction, a conditional create that matches points its `fullUrl` at the existing resource. Not supported yet (400): `PATCH`, conditional reads (`ifNoneMatch`, `ifModifiedSince`), conditional references (`"reference": "Patient?…"`) and absolute URLs.
 - **Limits:** at most 100 entries per Bundle (`MAX_BUNDLE_ENTRIES`) and 10 search entries (`MAX_BUNDLE_SEARCHES`); each search keeps the normal search limits.
 
 `delete` also takes `{ ifMatch }`, like `update`.
+
+### Conditional operations
+
+For idempotent imports and retries: "create this Patient unless one with this identifier exists".
+
+```ts
+const mrn = { identifier: 'urn:oid:1.2.36.1.2001.1003.0|A100' }; // search parameters, or a query string
+const { resource, created } = await fhir.as(session).conditionalCreate(patient, mrn); // created: false → the existing one
+await fhir.as(session).conditionalUpdate('Patient', mrn, patient); // update the match, or create it
+await fhir.as(session).conditionalDelete('Patient', mrn); // delete the match, if any
+```
+
+| | No match | One match | Several |
+| --- | --- | --- | --- |
+| `conditionalCreate` | creates (`created: true`) | returns it, writes nothing | 412 |
+| `conditionalUpdate` | creates (with the body's `id`, or a new one) | updates it (the body's `id`, if any, must be the match's) | 412 |
+| `conditionalDelete` | nothing to do (`deleted: false`) | deletes it | 412 |
+
+- **Search parameters only:** the condition is plain search parameters (at most 10), searched as the caller: through your policy and audit, like any search. Resources the caller can't see don't count as matches, so a conditional create can add a resource next to one the caller can't see. Run imports that must see everything as `asSystem(reason)`.
+- **No duplicates from concurrent retries:** writes with the same condition are serialized. In the write transaction, the store takes a lock on the condition and checks it again; if it no longer matches as it did (someone created a match meanwhile), the write fails with 412 and nothing is written. Retrying then returns the existing resource. This holds among conditional writes with the same condition. It doesn't cover an unconditional `create` that happens to match, or two different conditions that match the same resource: use one identifier per condition, and a unique constraint in your own schema if you need a hard guarantee across all writers.
+- `conditionalUpdate` won't overwrite a resource that doesn't match: with no match and a body `id` that already exists, it's 412.
 
 ### Expunge
 
@@ -174,7 +195,8 @@ In Express: `app.use('/fhir', toNodeHandler(createFhirHandler({ store, basePath:
 - Every request runs as `store.as(ctx)`: the same validation, `authorize` policy and `onAudit` as calls in code. Without a context it gets 401 and never reaches the store. `GET /metadata` (a CapabilityStatement built from the configured types and searchable parameters) is public.
 - Routes: `POST /` for transaction and batch Bundles; `GET /Type?…` and `POST /Type/_search` for search (`searchset` Bundles with absolute `fullUrl`s, `self` / `next` links, and `_include`d resources as `search.mode: 'include'` entries); `POST /Type`; `GET`, `PUT` and `DELETE /Type/id`; `GET /Type/id/_history` and `/_history/v`. `If-Match` maps to `ifMatch`; responses carry `ETag`, `Last-Modified` and, on create, `Location`.
 - Responses are `application/fhir+json` with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Errors are OperationOutcomes; unexpected errors become a generic 500 (pass `onError` to see them). Bodies over `maxBodyBytes` (default 10 MB) get 413.
-- Not handled: XML (`_format=xml` gets 406), `PATCH`, conditional operations, system- and type-level history, CORS and rate limiting (your app's job). Re-creating a deleted resource with `PUT` returns 200, not 201.
+- Conditional operations: `POST /Type` with `If-None-Exist` (201 when created, 200 with the existing resource when one matches), `PUT /Type?…` and `DELETE /Type?…`.
+- Not handled: XML (`_format=xml` gets 406), `PATCH`, conditional reads (`If-None-Match`, `If-Modified-Since`), system- and type-level history, CORS and rate limiting (your app's job). Re-creating a deleted resource with `PUT` returns 200, not 201.
 
 ### Search
 

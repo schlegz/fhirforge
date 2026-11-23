@@ -6,6 +6,7 @@ import {
   type FhirStorage,
   type Indexer,
   type PendingAuditRow,
+  type WriteCondition,
   type PlannedWrite,
   type StoredVersion,
   type UpdateResult,
@@ -159,6 +160,25 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
   const withVersion = (rows: readonly PendingAuditRow[] | undefined, version: StoredVersion | undefined) =>
     (rows ?? []).map(({ write: _write, ...r }) => ({ ...r, ...(version ? { versionId: version.versionId } : {}) }));
 
+  // ---- conditional writes ----
+
+  /**
+   * Serializes conditional writes with the same condition and re-checks it: under the lock,
+   * the condition must still match as planned, or nothing is written (412).
+   */
+  const checkCondition = async (tx: SqlClient, condition: WriteCondition | undefined) => {
+    if (!condition) return;
+    await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`fhirforge:conditional:${schema}:${condition.key}`]);
+    const t = tablesFor(schema, condition.query.resourceType);
+    const { rows } = await runSearch(tx, t, { ...condition.query, sort: [], count: 2, offset: 0 });
+    const ids = rows.map((r) => r.id);
+    const { expect } = condition;
+    const ok = expect === 'none' ? ids.length === 0 : ids.length === 1 && ids[0] === expect.id;
+    if (!ok) {
+      throw new FhirError(412, 'conflict', `${condition.query.resourceType}: the condition no longer matches as it did when checked`);
+    }
+  };
+
   // ---- writes: one implementation per kind, run inside a caller's transaction ----
 
   const applyUpdate = async (
@@ -239,6 +259,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     create(resource, opts = {}) {
       return run(resource.resourceType, () =>
         database.transaction(async (tx) => {
+          await checkCondition(tx, opts.condition);
           const version = await writeVersion(tx, resource.resourceType, resource.id, 1, resource, true, opts.index);
           await insertAudit(tx, withVersion(opts.audit, version));
           return version;
@@ -249,6 +270,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     update(resource, opts = {}) {
       return run(resource.resourceType, () =>
         database.transaction(async (tx) => {
+          await checkCondition(tx, opts.condition);
           const result = await applyUpdate(tx, resource, opts, opts.index);
           await insertAudit(tx, withVersion(opts.audit, result.version));
           return result;
@@ -259,6 +281,7 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
     delete(resourceType, id, opts = {}) {
       return run(resourceType, () =>
         database.transaction(async (tx) => {
+          await checkCondition(tx, opts.condition);
           const version = await applyDelete(tx, resourceType, id, opts.ifMatch);
           await insertAudit(tx, withVersion(opts.audit, version));
           return version;
@@ -306,6 +329,10 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       return run(writes[0] ? targetOf(writes[0])[0]! : '_audit', () =>
         database.transaction(async (tx) => {
           const results = new Array<WriteResult>(writes.length);
+          // Conditions first, locked in key order (no deadlocks between transactions), all checked
+          // before any write of this transaction changes what they'd match.
+          const conditions = writes.flatMap((w) => (w.condition ? [w.condition] : [])).sort((a, b) => compare(a.key, b.key));
+          for (const c of conditions) await checkCondition(tx, c);
           for (const { w, i } of order) results[i] = await applyWrite(tx, w, opts.index);
           const versionOf = (n: number | undefined) => {
             const r = n === undefined ? undefined : results[n];

@@ -54,9 +54,13 @@ export interface BundleResponseEntry {
 
 /** What one entry's `request` asks for. */
 export type EntryRequest =
-  | { method: 'POST'; resourceType: string }
-  | { method: 'PUT'; resourceType: string; id: string }
-  | { method: 'DELETE'; resourceType: string; id: string }
+  /** `condition`: from `request.ifNoneExist` (conditional create). */
+  | { method: 'POST'; resourceType: string; condition?: SearchParams }
+  /** Either `id` (`Type/id`) or `condition` (`Type?query`, conditional update / delete). */
+  | { method: 'PUT'; resourceType: string; id: string; condition?: undefined }
+  | { method: 'PUT'; resourceType: string; id?: undefined; condition: SearchParams }
+  | { method: 'DELETE'; resourceType: string; id: string; condition?: undefined }
+  | { method: 'DELETE'; resourceType: string; id?: undefined; condition: SearchParams }
   | { method: 'GET'; kind: 'read'; resourceType: string; id: string }
   | { method: 'GET'; kind: 'vread'; resourceType: string; id: string; versionId: string }
   | { method: 'GET'; kind: 'search'; resourceType: string; params: SearchParams };
@@ -98,10 +102,11 @@ export function parseEntryRequest(
   if (!request || typeof request.url !== 'string' || typeof request.method !== 'string') {
     throw FhirError.invalid('request with method and url is required');
   }
-  for (const header of ['ifNoneExist', 'ifNoneMatch', 'ifModifiedSince'] as const) {
-    if (request[header] !== undefined) throw FhirError.notSupported(`request.${header} (conditional operations) is not supported`);
+  for (const header of ['ifNoneMatch', 'ifModifiedSince'] as const) {
+    if (request[header] !== undefined) throw FhirError.notSupported(`request.${header} (conditional reads) is not supported`);
   }
   const { method, url } = request;
+  if (request.ifNoneExist !== undefined && method !== 'POST') throw FhirError.invalid('request.ifNoneExist is only allowed on POST');
   if (request.ifMatch !== undefined && method !== 'PUT' && method !== 'DELETE') {
     throw FhirError.invalid('request.ifMatch is only allowed on PUT and DELETE');
   }
@@ -123,13 +128,20 @@ export function parseEntryRequest(
     }
     throw FhirError.notSupported('request.url form is not supported');
   }
-  if (query !== undefined) throw FhirError.notSupported(`conditional ${safeMethod(method)} is not supported`);
   if (method === 'POST') {
-    if (parts.length !== 1) throw FhirError.invalid('POST request.url must be the resource type');
-    return { method, resourceType };
+    if (parts.length !== 1 || query !== undefined) throw FhirError.invalid('POST request.url must be the resource type');
+    return {
+      method,
+      resourceType,
+      ...(request.ifNoneExist !== undefined ? { condition: parseQuery(request.ifNoneExist.replace(/^\?/, '')) } : {}),
+    };
   }
   if (method === 'PUT' || method === 'DELETE') {
-    if (parts.length !== 2) throw FhirError.invalid(`${method} request.url must be Type/id`);
+    if (query !== undefined) {
+      if (parts.length !== 1) throw FhirError.invalid(`Conditional ${method} request.url must be Type?query`);
+      return { method, resourceType, condition: parseQuery(query) };
+    }
+    if (parts.length !== 2) throw FhirError.invalid(`${method} request.url must be Type/id or Type?query`);
     return { method, resourceType, id: checkId(parts[1]!) };
   }
   throw FhirError.notSupported(`request.method ${safeMethod(method)} is not supported`);
@@ -138,7 +150,7 @@ export function parseEntryRequest(
 const safeMethod = (m: string) => (/^[A-Z]{1,10}$/.test(m) ? m : '(invalid)');
 
 /** Parses `a=1&b=2&a=3` into search parameters (repeated names become arrays). */
-function parseQuery(query: string): SearchParams {
+export function parseQuery(query: string): SearchParams {
   const out: Record<string, string | string[]> = {};
   for (const pair of query.split('&')) {
     if (pair === '') continue;

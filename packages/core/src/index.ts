@@ -29,6 +29,7 @@ export {
   type StoredVersion,
   type UpdateResult,
   type WriteOptions,
+  type WriteCondition,
   type WriteResult,
 } from './storage.js';
 export type { AnyResource, FhirVersionPackage, HistoryEntry, MigrationResult, ResourceMapOf, SearchResult, Stored } from './types.js';
