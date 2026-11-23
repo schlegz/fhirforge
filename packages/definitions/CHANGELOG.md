@@ -1,5 +1,9 @@
 # @fhirforge/definitions
 
+## 0.10.0
+
+No changes in this release.
+
 ## 0.9.0
 
 No changes in this release.
