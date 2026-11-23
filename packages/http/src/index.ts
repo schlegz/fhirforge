@@ -100,10 +100,28 @@ export function createFhirHandler<M, Ctx>(options: FhirHandlerOptions<M, Ctx>): 
       if (type.startsWith('_')) throw FhirError.notSupported('System-level operations are not supported');
 
       if (id === undefined) {
-        allow(method, ['GET', 'POST']);
+        allow(method, ['GET', 'POST', 'PUT', 'DELETE']);
         if (method === 'GET') return json(200, await search(ops, base, type, searchParams(url.searchParams)));
+        const condition = searchParams(url.searchParams);
+        if (method === 'DELETE') {
+          if (Object.keys(condition).length === 0) throw new MethodNotAllowed(['GET', 'POST']); // DELETE /Type needs a condition
+          await ops.conditionalDelete(type, condition);
+          return empty(204);
+        }
         const resource = await body();
         if (resource.resourceType !== type) throw FhirError.invalid('resourceType does not match the URL');
+        if (method === 'PUT') {
+          if (Object.keys(condition).length === 0) throw new MethodNotAllowed(['GET', 'POST']); // PUT /Type needs a condition
+          const ifMatch = request.headers.get('if-match') ?? undefined;
+          const { resource: stored, created } = await ops.conditionalUpdate(type, condition, resource as never, ifMatch ? { ifMatch } : {});
+          return resourceResponse(created ? 201 : 200, stored, base);
+        }
+        const ifNoneExist = request.headers.get('if-none-exist');
+        if (ifNoneExist !== null) {
+          // Conditional create: 201 when created, 200 with the existing resource when one matches.
+          const { resource: stored, created } = await ops.conditionalCreate(resource as never, ifNoneExist);
+          return resourceResponse(created ? 201 : 200, stored, base);
+        }
         const created = await ops.create(resource as never);
         return resourceResponse(201, created, base);
       }
@@ -352,9 +370,9 @@ function capabilityStatement(store: FhirStore<Record<string, AnyResource>, unkno
           versioning: 'versioned',
           readHistory: true,
           updateCreate: true,
-          conditionalCreate: false,
-          conditionalUpdate: false,
-          conditionalDelete: 'not-supported',
+          conditionalCreate: true,
+          conditionalUpdate: true,
+          conditionalDelete: 'single',
           searchParam: store.searchParameters(type).map((p) => ({ name: p.code, type: p.type })),
           searchInclude: store.searchParameters(type).filter((p) => p.type === 'reference').map((p) => `${type}:${p.code}`),
           searchRevInclude: store.resourceTypes.flatMap((other) =>

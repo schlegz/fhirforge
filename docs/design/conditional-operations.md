@@ -1,6 +1,6 @@
 # Design: conditional create, update and delete
 
-Status: **draft for review** (2026-11-23). Roadmap: Later → proposed next. Nothing here is implemented.
+Status: **implemented** (2026-11-23) with the proposed answers: the condition is searched as the caller, advisory lock plus re-check, 412 on several matches for delete, new `conditional*` methods, and conditional references left for a follow-up.
 
 ## Why
 

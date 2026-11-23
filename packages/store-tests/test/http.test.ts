@@ -136,6 +136,31 @@ describe.each(backends)('HTTP handler on $name', (backend) => {
     expect(patient.searchRevInclude).not.toContain('Observation:specimen'); // can't point to a Patient
   });
 
+  it('handles conditional create (If-None-Exist), update and delete', async () => {
+    const mrn = encodeURIComponent('urn:oid:1.2.36.1.2001.1003.0|H1');
+    const body = { resourceType: 'Patient', identifier: [{ system: 'urn:oid:1.2.36.1.2001.1003.0', value: 'H1' }] };
+    const first = await send('POST', '/fhir/Patient', { body, headers: { 'if-none-exist': `identifier=${mrn}` } });
+    expect(first.status).toBe(201);
+    const again = await send('POST', '/fhir/Patient', { body, headers: { 'if-none-exist': `identifier=${mrn}` } });
+    expect([again.status, again.json!.id]).toEqual([200, first.json!.id]); // a retry doesn't duplicate
+    expect((await send('GET', `/fhir/Patient?identifier=${mrn}`)).json!.total).toBe(1);
+
+    const updated = await send('PUT', `/fhir/Patient?identifier=${mrn}`, { body: { ...body, active: true } });
+    expect([updated.status, updated.json!.id, updated.headers.get('etag')]).toEqual([200, first.json!.id, 'W/"2"']);
+    const createdByPut = await send('PUT', `/fhir/Patient?identifier=${encodeURIComponent('urn:oid:1.2.36.1.2001.1003.0|H2')}`, {
+      body: { resourceType: 'Patient', identifier: [{ system: 'urn:oid:1.2.36.1.2001.1003.0', value: 'H2' }] },
+    });
+    expect(createdByPut.status).toBe(201);
+
+    expect((await send('DELETE', `/fhir/Patient?identifier=${mrn}`)).status).toBe(204);
+    expect((await send('GET', `/fhir/Patient/${first.json!.id}`)).status).toBe(410);
+    expect((await send('DELETE', '/fhir/Patient')).status).toBe(405); // a type-level DELETE needs a condition
+
+    const meta = await send('GET', '/fhir/metadata', { auth: false });
+    const patient = meta.json!.rest[0].resource.find((r: any) => r.type === 'Patient');
+    expect([patient.conditionalCreate, patient.conditionalUpdate, patient.conditionalDelete]).toEqual([true, true, 'single']);
+  });
+
   it('runs transaction and batch Bundles posted to the base URL', async () => {
     const res = await send('POST', '/fhir', {
       body: {

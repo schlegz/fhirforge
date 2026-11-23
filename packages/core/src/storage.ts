@@ -15,6 +15,21 @@ export interface WriteOptions {
    * single write from its result, for `writeAll` from the result at index `write`.
    */
   audit?: readonly PendingAuditRow[];
+  /** For a conditional write: re-checked under a lock in the write transaction (412 if it changed). */
+  condition?: WriteCondition;
+}
+
+/**
+ * The guard of a conditional write (`If-None-Exist`, `PUT Type?…`, `DELETE Type?…`).
+ * In the write transaction, the adapter takes an advisory lock on `key` (so conditional
+ * writes with the same condition are serialized), runs `query`, and throws 412 unless it
+ * still matches as planned: nothing (`'none'`) or exactly the resource `{ id }`.
+ * `key` and `query` can contain search values: bind them, never log them.
+ */
+export interface WriteCondition {
+  key: string;
+  query: SearchQuery;
+  expect: 'none' | { id: string };
 }
 
 /**
@@ -87,7 +102,7 @@ export interface FhirStorage {
   delete(
     resourceType: string,
     id: string,
-    options?: { ifMatch?: string } & Pick<WriteOptions, 'audit'>,
+    options?: { ifMatch?: string } & Pick<WriteOptions, 'audit' | 'condition'>,
   ): Promise<StoredVersion | undefined>;
 
   /**
@@ -133,9 +148,9 @@ export interface FhirStorage {
 
 /** One write in a `writeAll` call. */
 export type PlannedWrite =
-  | { kind: 'create'; resource: AnyResource & { id: string } }
-  | { kind: 'update'; resource: AnyResource & { id: string }; ifMatch?: string; ifNoneExist?: boolean }
-  | { kind: 'delete'; resourceType: string; id: string; ifMatch?: string };
+  | { kind: 'create'; resource: AnyResource & { id: string }; condition?: WriteCondition }
+  | { kind: 'update'; resource: AnyResource & { id: string }; ifMatch?: string; ifNoneExist?: boolean; condition?: WriteCondition }
+  | { kind: 'delete'; resourceType: string; id: string; ifMatch?: string; condition?: WriteCondition };
 
 /** The result of one write, like the single method of its kind returns. */
 export type WriteResult =

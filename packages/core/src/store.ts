@@ -10,6 +10,7 @@ import {
   MAX_BUNDLE_ENTRIES,
   MAX_BUNDLE_SEARCHES,
   parseEntryRequest,
+  parseQuery,
   referencesAny,
   resolveReferences,
   statusLine,
@@ -19,7 +20,16 @@ import {
   type BundleResponseEntry,
   type EntryRequest,
 } from './bundle.js';
-import type { AuditRow, FhirStorage, Indexer, PendingAuditRow, PlannedWrite, StoredVersion, UpdateResult } from './storage.js';
+import type {
+  AuditRow,
+  FhirStorage,
+  Indexer,
+  PendingAuditRow,
+  PlannedWrite,
+  StoredVersion,
+  UpdateResult,
+  WriteCondition,
+} from './storage.js';
 import { createValidator } from './validation/validate.js';
 import type {
   AnyResource,
@@ -86,6 +96,33 @@ export interface FhirDataOperations<M> {
    * Pass `ifMatch` to fail with 412 unless the current version is the one you read.
    */
   delete<RT extends keyof M & string>(resourceType: RT, id: string, options?: { ifMatch?: string }): Promise<void>;
+
+  /**
+   * Creates the resource unless one matching `condition` exists (FHIR `If-None-Exist`).
+   * No match: creates it (`created: true`). One match: returns it, writes nothing. More: 412.
+   * The condition is search parameters (or a query string), searched as the caller (through
+   * the policy). Concurrent conditional writes with the same condition are serialized: a
+   * write whose condition changed after it was checked fails with 412.
+   */
+  conditionalCreate<RT extends keyof M & string>(
+    resource: ResourceOf<M, RT>,
+    condition: SearchParams | string,
+  ): Promise<{ resource: Stored<M[RT]>; created: boolean }>;
+
+  /**
+   * Updates the one resource matching `condition`, or creates it if none matches (FHIR
+   * `PUT Type?…`). More than one match: 412. The body's `id`, if any, must be the match's
+   * (or, with no match, a new id; an existing resource that doesn't match is a 412).
+   */
+  conditionalUpdate<RT extends keyof M & string>(
+    resourceType: RT,
+    condition: SearchParams | string,
+    resource: ResourceOf<M, RT>,
+    options?: { ifMatch?: string },
+  ): Promise<{ resource: Stored<M[RT]>; created: boolean }>;
+
+  /** Deletes the one resource matching `condition` (FHIR `DELETE Type?…`). No match: nothing to do. More: 412. */
+  conditionalDelete<RT extends keyof M & string>(resourceType: RT, condition: SearchParams | string): Promise<{ deleted: boolean }>;
 
   /**
    * Permanently removes a resource: every version and every search index row, in one
@@ -166,6 +203,9 @@ function normalizeVersion(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   return value.trim().replace(/^W\//, '').replace(/^"(.*)"$/, '$1');
 }
+
+/** Most parameter values in a conditional operation's condition. */
+const MAX_CONDITION_PARAMS = 10;
 
 /** Longest `expunge` reason kept in audit events. */
 const MAX_REASON_LENGTH = 1000;
@@ -487,6 +527,48 @@ export function createFhirStore<
     });
   };
 
+  // ---- conditional writes ----
+
+  /** Validates a condition: plain search parameters, no paging, sorting, chains or includes. */
+  const conditionParams = (condition: SearchParams | string): SearchParams => {
+    const params: SearchParams = typeof condition === 'string' ? parseQuery(condition.replace(/^\?/, '')) : condition ?? {};
+    const keys = Object.keys(params).filter((k) => params[k] !== undefined);
+    if (keys.length === 0) throw FhirError.invalid('A conditional operation needs a condition');
+    for (const key of keys) {
+      if (RESULT_PARAMS.has(key) || key === '_format' || isChainKey(key) || isIncludeKey(key)) {
+        throw FhirError.invalid('A condition can only use search parameters (no _count, _offset, _sort, chains or includes)');
+      }
+    }
+    const count = keys.reduce((n, k) => n + (Array.isArray(params[k]) ? (params[k] as unknown[]).length : 1), 0);
+    if (count > MAX_CONDITION_PARAMS) throw FhirError.invalid(`A condition may have at most ${MAX_CONDITION_PARAMS} parameters`);
+    return params;
+  };
+
+  /**
+   * Runs a condition as the caller (a search through the policy, audited), and builds the
+   * guard that re-checks it at write time: the same query plus the policy's search filter.
+   */
+  const findMatches = async (scope: Scope<Ctx>, ops: SingleOperations, resourceType: string, condition: SearchParams) => {
+    if (!table) throw FhirError.notSupported(`FHIR ${fhir.fhirVersion} package has no compiled search parameters`);
+    const decision = await decide(scope, { action: 'search', resourceType, params: condition });
+    if (!decision.allowed) throw forbidden('search', resourceType);
+    const query = parseSearch(resourceType, mergeFilter(condition, decision.filter), table, policy);
+    const page = await ops.search(resourceType, { ...condition, _count: 2 });
+    // The canonical form of the parsed clauses: equivalent spellings of a condition share a lock.
+    const key = `${resourceType}|${JSON.stringify(query.clauses.map((c) => JSON.stringify(c)).sort())}`;
+    return {
+      matches: page.resources as (AnyResource & { id: string; meta: { versionId: string; lastUpdated: string } })[],
+      key,
+      guard: (expect: WriteCondition['expect']): WriteCondition => ({ key, query: { ...query, sort: [], count: 2, offset: 0 }, expect }),
+    };
+  };
+
+  const multipleMatches = (resourceType: string) =>
+    new FhirError(412, 'multiple-matches', `The condition matches more than one ${resourceType}`);
+
+  /** Parameter names of a condition, for audit events (never values). */
+  const namesOf = (params: SearchParams) => Object.keys(params).filter((k) => params[k] !== undefined);
+
   // ---- data operations, per scope ----
   const operations = (scope: Scope<Ctx>): FhirDataOperations<Record<string, AnyResource>> => {
     const ops: SingleOperations = {
@@ -536,6 +618,79 @@ export function createFhirStore<
         if (!plan) return { result: undefined }; // nothing to delete: audited on its own
         const version = await storage.delete(resourceType, id, { ifMatch: (plan as { ifMatch: string }).ifMatch, ...withRows({}) });
         return { result: undefined, ...(version ? { versionId: version.versionId } : {}), persisted: auditTable };
+      });
+    },
+
+    async conditionalCreate(resource, condition) {
+      const resourceType = checkType(resource?.resourceType);
+      const params = conditionParams(condition);
+      const found = await findMatches(scope, ops, resourceType, params);
+      // One match: return it. Its read was checked and audited by the condition's search.
+      if (found.matches.length === 1) return { resource: found.matches[0] as never, created: false };
+      return audited(scope, { action: 'create', resourceType, params: namesOf(params) }, async (withRows) => {
+        if (found.matches.length > 1) throw multipleMatches(resourceType);
+        const plan = (await planCreate(scope, resource, crypto.randomUUID(), false)) as Extract<PlannedWrite, { kind: 'create' }>;
+        const version = await storage.create(plan.resource, {
+          ...writeOptions,
+          condition: found.guard('none'),
+          ...withRows({ id: plan.resource.id }),
+        });
+        return { result: { resource: version.resource as never, created: true }, id: plan.resource.id, versionId: version.versionId, persisted: auditTable };
+      });
+    },
+
+    async conditionalUpdate(resourceType, condition, resource, updateOptions) {
+      checkType(resourceType);
+      if (resource?.resourceType !== resourceType) throw FhirError.invalid('resourceType does not match');
+      const params = conditionParams(condition);
+      const found = await findMatches(scope, ops, resourceType, params);
+      return audited(scope, { action: 'update', resourceType, params: namesOf(params) }, async (withRows) => {
+        if (found.matches.length > 1) throw multipleMatches(resourceType);
+        const match = found.matches[0];
+        const body = resource as AnyResource;
+        if (match && body.id !== undefined && body.id !== match.id) {
+          throw FhirError.invalid('Resource id does not match the resource the condition matched');
+        }
+        const id = match ? match.id : checkId(body.id ?? crypto.randomUUID());
+        const target = { ...body, id };
+        const plan = (await planUpdate(scope, target, match ? updateOptions?.ifMatch : undefined, false)) as Extract<
+          PlannedWrite,
+          { kind: 'update' }
+        >;
+        // No match: create, and only if nothing has this id yet (an existing resource that doesn't match is a 412).
+        const guard = match ? { ifMatch: plan.ifMatch, ifNoneExist: plan.ifNoneExist } : { ifNoneExist: true };
+        const result = await storage.update(plan.resource, {
+          ...writeOptions,
+          ...(guard.ifMatch !== undefined ? { ifMatch: guard.ifMatch } : {}),
+          ...(guard.ifNoneExist ? { ifNoneExist: true } : {}),
+          condition: found.guard(match ? { id } : 'none'),
+          ...withRows({ id }),
+        });
+        return {
+          result: { resource: result.version.resource as never, created: result.created },
+          id,
+          versionId: result.version.versionId,
+          persisted: auditTable,
+        };
+      });
+    },
+
+    async conditionalDelete(resourceType, condition) {
+      checkType(resourceType);
+      const params = conditionParams(condition);
+      const found = await findMatches(scope, ops, resourceType, params);
+      return audited(scope, { action: 'delete', resourceType, params: namesOf(params) }, async (withRows) => {
+        if (found.matches.length > 1) throw multipleMatches(resourceType);
+        const match = found.matches[0];
+        if (!match) return { result: { deleted: false } }; // nothing matches: nothing to delete
+        const plan = await planDelete(scope, resourceType, match.id, undefined);
+        if (!plan) return { result: { deleted: false }, id: match.id };
+        const version = await storage.delete(resourceType, match.id, {
+          ifMatch: (plan as { ifMatch: string }).ifMatch,
+          condition: found.guard({ id: match.id }),
+          ...withRows({ id: match.id }),
+        });
+        return { result: { deleted: version !== undefined }, id: match.id, ...(version ? { versionId: version.versionId } : {}), persisted: auditTable };
       });
     },
 
@@ -780,6 +935,8 @@ export function createFhirStore<
     const ops = operations(scope);
     const operationId = scope.operationId!;
     const versions: (string | undefined)[] = [];
+    /** Conditional creates that matched an existing resource (no write). */
+    const existing: (AnyResource & { id: string; meta: { versionId: string; lastUpdated: string } })[] = [];
     const requests: EntryRequest[] = [];
     const ids: (string | undefined)[] = [];
     let failedAt = -1;
@@ -789,9 +946,13 @@ export function createFhirStore<
       const entries = checkBundle(scope, bundle, 'transaction');
       entryCount = entries.length;
 
-      // 1. Parse every request; assign ids to creates; map urn:uuid fullUrls to their Type/id.
-      const targets = new Map<string, string>();
+      // 1. Parse every request; assign ids to creates.
       const written = new Set<string>();
+      const claim = (i: number, resourceType: string, id: string) => {
+        const key = `${resourceType}/${id}`;
+        if (written.has(key)) throw atEntry(i, FhirError.invalid(`${key} appears in more than one entry`));
+        written.add(key);
+      };
       for (const [i, entry] of entries.entries()) {
         failedAt = i;
         const r = await inEntry(i, () => {
@@ -799,24 +960,62 @@ export function createFhirStore<
           if (r.method === 'POST' || r.method === 'PUT') {
             if (!entry.resource) throw FhirError.invalid('resource is required for POST and PUT');
             if (entry.resource.resourceType !== r.resourceType) throw FhirError.invalid('resource type does not match request.url');
-            if (r.method === 'PUT' && entry.resource.id !== r.id) throw FhirError.invalid('resource.id must match request.url');
-          }
-          if (r.method === 'PUT' || r.method === 'DELETE') {
-            const key = `${r.resourceType}/${r.id}`;
-            if (written.has(key)) throw FhirError.invalid(`${key} appears in more than one entry`);
-            written.add(key);
+            if (r.method === 'PUT' && r.id !== undefined && entry.resource.id !== r.id) throw FhirError.invalid('resource.id must match request.url');
           }
           return r;
         });
         requests.push(r);
-        const id = r.method === 'POST' ? crypto.randomUUID() : 'id' in r ? r.id : undefined;
-        ids.push(id);
-        if (entry.fullUrl?.startsWith('urn:uuid:')) {
-          if (targets.has(entry.fullUrl)) throw atEntry(i, FhirError.invalid('fullUrl appears in more than one entry'));
-          if (r.method === 'POST' || r.method === 'PUT') targets.set(entry.fullUrl, `${r.resourceType}/${id}`);
-        }
+        ids.push(r.method === 'POST' ? crypto.randomUUID() : r.method === 'GET' ? ('id' in r ? r.id : undefined) : r.id);
+        if ((r.method === 'PUT' || r.method === 'DELETE') && r.id !== undefined) claim(i, r.resourceType, r.id);
       }
       countSearches(requests);
+
+      // 1b. Conditional entries: run each condition as the caller, decide its target, and keep a
+      //     guard that the write re-checks under a lock. A conditional create that matches writes
+      //     nothing and points its fullUrl at the existing resource.
+      const guards: (WriteCondition | undefined)[] = [];
+      const createOnly: boolean[] = [];
+      const conditionKeys = new Set<string>();
+      for (const [i, r] of requests.entries()) {
+        if (r.method === 'GET' || !r.condition) continue;
+        failedAt = i;
+        await inEntry(i, async () => {
+          const found = await findMatches(scope, ops, r.resourceType, conditionParams(r.condition!));
+          if (conditionKeys.has(found.key)) throw FhirError.invalid('Two entries use the same condition');
+          conditionKeys.add(found.key);
+          if (found.matches.length > 1) throw multipleMatches(r.resourceType);
+          const match = found.matches[0];
+          if (r.method === 'POST') {
+            if (match) {
+              existing[i] = match;
+              ids[i] = match.id;
+            } else guards[i] = found.guard('none');
+            return;
+          }
+          if (r.method === 'PUT') {
+            const bodyId = entries[i]!.resource!.id;
+            if (match && bodyId !== undefined && bodyId !== match.id) {
+              throw FhirError.invalid('Resource id does not match the resource the condition matched');
+            }
+            ids[i] = match ? match.id : checkId(bodyId ?? crypto.randomUUID());
+            guards[i] = found.guard(match ? { id: match.id } : 'none');
+            createOnly[i] = !match;
+          } else {
+            ids[i] = match?.id;
+            if (match) guards[i] = found.guard({ id: match.id });
+          }
+          if (ids[i]) claim(i, r.resourceType, ids[i]!);
+        });
+      }
+
+      // Map urn:uuid fullUrls to the Type/id each entry ends up with.
+      const targets = new Map<string, string>();
+      for (const [i, entry] of entries.entries()) {
+        const r = requests[i]!;
+        if (!entry.fullUrl?.startsWith('urn:uuid:')) continue;
+        if (targets.has(entry.fullUrl)) throw atEntry(i, FhirError.invalid('fullUrl appears in more than one entry'));
+        if (r.method === 'POST' || r.method === 'PUT') targets.set(entry.fullUrl, `${r.resourceType}/${ids[i]}`);
+      }
 
       // 2. Resolve references, then check every write with the policy (DELETE, POST, PUT), writing nothing yet.
       const order = requests.map((_, i) => i).sort((a, b) => RANK[requests[a]!.method] - RANK[requests[b]!.method] || a - b);
@@ -825,13 +1024,21 @@ export function createFhirStore<
         const r = requests[i]!;
         if (r.method === 'GET') continue;
         failedAt = i;
+        if (existing[i]) continue; // conditional create that matched: nothing to write
         plans[i] = await inEntry(i, async () => {
-          if (r.method === 'DELETE') return planDelete(scope, r.resourceType, r.id, entries[i]!.request?.ifMatch);
+          const condition = guards[i] ? { condition: guards[i] } : {};
+          if (r.method === 'DELETE') {
+            if (!ids[i]) return undefined; // conditional delete without a match: nothing to delete
+            const plan = await planDelete(scope, r.resourceType, ids[i]!, entries[i]!.request?.ifMatch);
+            return plan ? { ...plan, ...condition } : undefined;
+          }
           // The Bundle was validated as a whole; rewriting urn:uuid references keeps it valid.
           const resource = resolveReferences(entries[i]!.resource!, targets);
-          return r.method === 'POST'
-            ? planCreate(scope, resource, ids[i]!, true)
-            : planUpdate(scope, resource as AnyResource & { id: string }, entries[i]!.request?.ifMatch, true);
+          if (r.method === 'POST') return { ...(await planCreate(scope, resource, ids[i]!, true)), ...condition };
+          const target = { ...resource, id: ids[i]! };
+          const plan = (await planUpdate(scope, target, entries[i]!.request?.ifMatch, true)) as Extract<PlannedWrite, { kind: 'update' }>;
+          // A conditional update without a match creates, and only if nothing has that id yet.
+          return createOnly[i] ? { kind: 'update' as const, resource: plan.resource, ifNoneExist: true, ...condition } : { ...plan, ...condition };
         });
       }
       failedAt = -1;
@@ -841,7 +1048,7 @@ export function createFhirStore<
       const writeIndexes = requests.map((_, i) => i).filter((i) => plans[i]);
       const rows = pendingRows(scope, operationId, [
         ...requests.flatMap((r, i) => {
-          if (r.method === 'GET') return [];
+          if (r.method === 'GET' || existing[i]) return [];
           const n = writeIndexes.indexOf(i);
           return [{ action: actionOf(r), resourceType: r.resourceType, ...(ids[i] ? { id: ids[i] } : {}), outcome: 'success' as const, ...(n >= 0 ? { write: n } : {}) }];
         }),
@@ -863,6 +1070,8 @@ export function createFhirStore<
       }
       for (const [i, r] of requests.entries()) {
         if (r.method === 'DELETE' && !response[i]) response[i] = { response: { status: statusLine(204) } }; // nothing to delete
+        const found = existing[i];
+        if (found) response[i] = writeResponse({ versionId: found.meta.versionId, lastUpdated: found.meta.lastUpdated, deleted: false, resource: found }, 200);
       }
     } catch (err) {
       // Nothing was written: every entry is audited as failed, the failing one with its own outcome.
@@ -886,7 +1095,7 @@ export function createFhirStore<
     // the GET entries (each checked and audited as a single read or search).
     const persisted = auditTable;
     for (const [i, r] of requests.entries()) {
-      if (r.method === 'GET') continue;
+      if (r.method === 'GET' || existing[i]) continue;
       await audit(
         scope,
         {
@@ -937,7 +1146,8 @@ export function createFhirStore<
           continue;
         }
         if (r.method === 'DELETE') {
-          await ops.delete(r.resourceType, r.id, { ifMatch: entry.request?.ifMatch });
+          if (r.condition) await ops.conditionalDelete(r.resourceType, r.condition);
+          else await ops.delete(r.resourceType, r.id, { ifMatch: entry.request?.ifMatch });
           response.push({ response: { status: statusLine(204) } });
           continue;
         }
@@ -947,9 +1157,23 @@ export function createFhirStore<
         if (referencesAny(resource, fullUrls)) {
           throw FhirError.invalid('batch entries cannot reference each other (use a transaction)');
         }
-        if (r.method === 'POST') {
+        const asVersion = (s: AnyResource & { id?: string; meta?: { versionId?: string; lastUpdated?: string } }) => ({
+          versionId: s.meta!.versionId!,
+          lastUpdated: s.meta!.lastUpdated!,
+          deleted: false,
+          resource: s as AnyResource & { id: string },
+        });
+        if (r.method === 'POST' && r.condition) {
+          const { resource: stored, created } = await ops.conditionalCreate(resource as never, r.condition);
+          response.push(writeResponse(asVersion(stored), created ? 201 : 200));
+        } else if (r.method === 'POST') {
           const created = await ops.create(resource as never);
-          response.push(writeResponse({ versionId: created.meta.versionId, lastUpdated: created.meta.lastUpdated, deleted: false, resource: created }, 201));
+          response.push(writeResponse(asVersion(created), 201));
+        } else if (r.condition) {
+          const { resource: stored, created } = await ops.conditionalUpdate(r.resourceType, r.condition, resource as never, {
+            ...(entry.request?.ifMatch ? { ifMatch: entry.request.ifMatch } : {}),
+          });
+          response.push(writeResponse(asVersion(stored), created ? 201 : 200));
         } else {
           if (resource.id !== r.id) throw FhirError.invalid('resource.id must match request.url');
           const { version, created } = await updateOne(scope, resource as AnyResource & { id: string }, entry.request?.ifMatch);
