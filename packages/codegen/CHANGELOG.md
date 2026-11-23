@@ -1,5 +1,13 @@
 # @fhirforge/codegen
 
+## 0.11.0
+
+### Patch Changes
+
+- Updated dependencies [e190bcd]
+  - @fhirforge/core@0.11.0
+  - @fhirforge/definitions@0.11.0
+
 ## 0.10.0
 
 ### Patch Changes
