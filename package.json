@@ -16,12 +16,19 @@
     "changeset": "changeset",
     "release": "pnpm build && node scripts/publish.mjs",
     "release:check": "pnpm build && node scripts/publish.mjs --dry-run",
-    "version-packages": "changeset version && pnpm install --lockfile-only"
+    "version-packages": "changeset version && pnpm install --lockfile-only",
+    "dev:db": "tsx scripts/dev-db.ts"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
+    "@electric-sql/pglite": "^0.5.17",
+    "@fhirforge/pg": "workspace:*",
+    "@fhirforge/pglite": "workspace:*",
+    "@fhirforge/r4": "workspace:*",
     "@types/node": "^26.6.6",
+    "@types/pg": "^8.15.0",
     "expect-type": "^1.4.0",
+    "pg": "^8.23.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.1.1"

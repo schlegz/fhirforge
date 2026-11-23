@@ -5,3 +5,5 @@ dist/
 coverage/
 .examples-tmp/
 .release/
+# Local PGlite databases from `pnpm dev:db --pglite`
+.fhir-dev/

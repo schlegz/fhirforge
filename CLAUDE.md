@@ -58,6 +58,7 @@ fhirforge/
 ├── .github/workflows/release.yml              Release: "Version packages" PR, then npm publish via trusted publishing.
 ├── docs/roadmap.md                            What's done, what's next (in order), open decisions. Start here for new work.
 ├── docs/design/                               Design docs for upcoming work (drafts until reviewed), e.g. bundles.md.
+├── scripts/dev-db.ts                          `pnpm dev:db`: creates a local dev database (Postgres or PGlite) and migrates every R4 type.
 ├── scripts/publish.mjs                        Packs (pnpm) and publishes (npm) unpublished versions, with safety checks;
 │                                              safe to re-run (publish-errors.mjs recognizes duplicate-version refusals).
 ├── tsconfig.base.json                         Shared compiler options (strict, NodeNext, verbatimModuleSyntax, composite).
@@ -86,6 +87,7 @@ pnpm test                  # build, Vitest (definitions, codegen, core, store-te
 pnpm test:types            # type-level tests only (ts-expect-error / expect-type)
 pnpm test:examples [--no-types] [dir]  # type-check and validate FHIR JSON examples (default: packages/r4/test/examples)
 pnpm gen:r4                # regenerate packages/r4/src/generated from hl7.fhir.r4.core@4.0.1
+pnpm dev:db [name] [--pglite]  # create a local dev database (asks for the name) and migrate every R4 type
 pnpm changeset             # record a change for the next release
 pnpm release:check         # build and run every publish check without publishing
 ```
@@ -95,6 +97,7 @@ Releases (see README.md > Releasing) run from `.github/workflows/release.yml` vi
 Environment variables:
 
 - `FHIRFORGE_R4_SOURCE=<dir>`: load R4 definitions from a local folder instead of packages.fhir.org (offline runs).
+- `FHIRFORGE_DEV_DATABASE_URL=postgres://…`: the local server `pnpm dev:db` creates databases on (default `postgres://postgres@localhost:5432/postgres`; local hosts only).
 - `FHIRFORGE_TEST_DATABASE_URL=postgres://…`: also run store-tests against a real Postgres. Each run creates throwaway `fhir_test_*` schemas and drops them.
 
 Before finishing any change, run `pnpm test`. If you changed `pg` or `core`, also run it with `FHIRFORGE_TEST_DATABASE_URL` set when a Postgres is available: PGlite is single-connection and hides concurrency and locking bugs.
