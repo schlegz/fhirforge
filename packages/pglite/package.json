@@ -1,6 +1,6 @@
 {
   "name": "@fhirforge/pglite",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "In-process PGlite storage for fhirforge: real Postgres with no server, for tests and local development.",
   "license": "Apache-2.0",
   "author": "Scott Schlegel",

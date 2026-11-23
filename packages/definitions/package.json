@@ -1,6 +1,6 @@
 {
   "name": "@fhirforge/definitions",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Loads official FHIR packages (StructureDefinitions, ValueSets, CodeSystems, SearchParameters) and builds element trees. Build-time only.",
   "license": "Apache-2.0",
   "author": "Scott Schlegel",

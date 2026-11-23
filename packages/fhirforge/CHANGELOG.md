@@ -1,5 +1,14 @@
 # fhirforge
 
+## 0.8.0
+
+### Patch Changes
+
+- Updated dependencies [51fec06]
+  - @fhirforge/core@0.8.0
+  - @fhirforge/pg@0.8.0
+  - @fhirforge/r4@0.8.0
+
 ## 0.7.0
 
 ### Patch Changes
