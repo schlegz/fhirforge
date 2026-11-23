@@ -1,5 +1,12 @@
 # @fhirforge/r4
 
+## 0.11.0
+
+### Patch Changes
+
+- Updated dependencies [e190bcd]
+  - @fhirforge/core@0.11.0
+
 ## 0.10.0
 
 ### Patch Changes
