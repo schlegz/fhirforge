@@ -1,5 +1,14 @@
 # fhirforge
 
+## 0.10.0
+
+### Patch Changes
+
+- Updated dependencies [39ea3fa]
+  - @fhirforge/core@0.10.0
+  - @fhirforge/pg@0.10.0
+  - @fhirforge/r4@0.10.0
+
 ## 0.9.0
 
 ### Patch Changes
