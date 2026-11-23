@@ -1,6 +1,6 @@
 {
   "name": "@fhirforge/http",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "FHIR REST API for fhirforge: a fetch-style handler (Next.js, Hono, Bun, Deno) and a Node adapter (Express, node:http).",
   "license": "Apache-2.0",
   "author": "Scott Schlegel",
