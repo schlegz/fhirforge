@@ -23,12 +23,12 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ## Next, in order
 
-Nothing queued: pick the next item from **Later**.
+### 1. Field-level encryption and blind indexes
+
+Envelope encryption of resource bodies (app-supplied KMS keys, AES-256-GCM, key ids on rows) and the `blind` search policy (keyed hashes, exact match only). Design draft for review: [design/encryption.md](design/encryption.md).
 
 ## Later
 
-- **Blind indexes:** the `blind` search policy (HMAC with an app-supplied key, exact match only).
-- **Field-level encryption:** `encryptor` hook, envelope encryption, key ID per row (CLAUDE.md §5).
 - **First publish of `@fhirforge/http`:** a new package's first version goes out by hand before trusted publishing can be configured (README > Releasing). Do it before merging the next "Version packages" PR.
 - **REST follow-ups:** `PATCH`, conditional reads (`If-None-Match`, `If-Modified-Since`), `Prefer: return=minimal`, `HEAD`, type- and system-level history and search, `_summary` / `_elements`, XML. `PUT` re-creating a deleted resource returns 200 instead of 201 (the store's `update` doesn't report `created`).
 - **Bundle follow-ups:** conditional references in transactions (`"reference": "Patient?identifier=…"`), `PATCH` entries, absolute request URLs, `prefer` return modes, and `next` links for search entries.
