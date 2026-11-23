@@ -32,7 +32,7 @@ import type {
   WriteCondition,
 } from './storage.js';
 import { createValidator } from './validation/validate.js';
-import { encryptedStorage, type EncryptionOptions } from './encryption.js';
+import { DATA_KEY_RETENTION_MS, encryptedStorage, type EncryptionOptions } from './encryption.js';
 import type {
   AnyResource,
   FhirVersionPackage,
@@ -205,6 +205,14 @@ export interface FhirStore<M, Ctx = unknown> extends FhirDataOperations<M> {
    * Needs the `encryption` option. Returns how many resources were rewritten, per type.
    */
   reencrypt<RT extends keyof M & string>(options?: { resourceType?: RT; olderThan?: Date }): Promise<Record<string, number>>;
+
+  /**
+   * Deletes data keys that no stored version uses any more (after `reencrypt` or expunge).
+   * Only keys more than 48 hours old are considered, and every table in the schema is checked,
+   * so keys still in use by any process or store are kept. Needs `DELETE` on `_data_keys`:
+   * run it with a maintenance store whose role has it. Returns how many keys were removed.
+   */
+  removeUnusedDataKeys(): Promise<number>;
 
   /** Rebuilds search indexes (all configured types, or one). Run after changing the search policy. */
   reindex<RT extends keyof M & string>(resourceType?: RT): Promise<Record<string, number>>;
@@ -1250,6 +1258,10 @@ export function createFhirStore<
       // The wrapped storage fills in open and seal.
       for (const t of types) out[t] = await storage.reencrypt(t, { open: (v) => Promise.resolve(v), seal: undefined as never, ...(olderThan ? { olderThan } : {}) });
       return out;
+    },
+    async removeUnusedDataKeys() {
+      if (!options.encryption) throw new Error('removeUnusedDataKeys: the store has no `encryption` option');
+      return storage.removeDataKeys({ createdBefore: new Date(Date.now() - DATA_KEY_RETENTION_MS).toISOString() });
     },
     async reindex(resourceType) {
       if (resourceType !== undefined) checkType(resourceType);

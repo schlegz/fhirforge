@@ -458,6 +458,24 @@ export function postgresStorage(db: Database | PgPoolLike, options: PostgresStor
       });
     },
 
+    removeDataKeys({ createdBefore }) {
+      return run('_data_keys', async () => {
+        // Every table in the schema that can reference a data key, whichever store wrote it.
+        const { rows: tables } = await database.query<{ table_name: string }>(
+          `SELECT table_name FROM information_schema.columns WHERE table_schema = $1 AND column_name = 'dek_id' ORDER BY table_name`,
+          [schema],
+        );
+        const unused = tables.map((t) => `NOT EXISTS (SELECT 1 FROM ${ident(schema)}.${ident(t.table_name)} r WHERE r.dek_id = d.id)`);
+        const { rows } = await database.query<{ n: number }>(
+          `WITH removed AS (
+             DELETE FROM ${dataKeysTable} d WHERE d.created < $1::timestamptz${unused.map((u) => ` AND ${u}`).join('')} RETURNING 1
+           ) SELECT count(*)::int AS n FROM removed`,
+          [createdBefore],
+        );
+        return rows[0]!.n;
+      });
+    },
+
     dataKeys(ids) {
       if (ids.length === 0) return Promise.resolve([]);
       return run('_data_keys', async () => {

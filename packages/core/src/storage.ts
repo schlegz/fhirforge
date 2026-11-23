@@ -171,6 +171,12 @@ export interface FhirStorage {
    */
   reindex(resourceType: string, index: Indexer, options?: { open?: Opener }): Promise<number>;
 
+  /**
+   * Deletes data keys created before `createdBefore` that no row in the schema references
+   * (any table with a `dek_id` column, not only this store's types). Returns how many.
+   */
+  removeDataKeys(options: { createdBefore: string }): Promise<number>;
+
   /** The wrapped data keys with these ids (for decryption). */
   dataKeys(ids: readonly string[]): Promise<{ id: string; keyId: string; wrapped: string }[]>;
 

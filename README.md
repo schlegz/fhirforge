@@ -173,7 +173,8 @@ const fhir = createFhirStore({
   search: { policy: { 'Patient.family': 'blind', 'Patient.identifier': 'blind', 'Patient.birthdate': 'blind', 'Patient.address': 'none' } },
   ```
 - **Turning it on for existing data:** existing plaintext rows stay readable, so you can enable encryption without downtime. Then run `await fhir.reencrypt()` once to encrypt them. After the master key rotates in the KMS, `await fhir.reencrypt({ olderThan: rotationDate })` moves every version to a new data key. It works one resource per transaction, with the row locked.
-- **Mixed mode is a trade-off:** while plaintext rows are readable, someone with *write* access to the database could put plaintext in place of a ciphertext and it would be served. Run `reencrypt()` after enabling encryption. A strict mode that refuses plaintext rows is planned.
+- **Strict mode:** while plaintext rows are readable, someone with *write* access to the database could put plaintext in place of a ciphertext and it would be served. Once `reencrypt()` returns 0 for every type, set `encryption.requireEncrypted: true`: a plaintext body is then an error on read (`Patient/123 is stored in plaintext`), never data. `reencrypt()` still works in strict mode, so you can turn it on early and convert afterwards, at the cost of failed reads in between.
+- **Removing old data keys:** after `reencrypt()` or expunge, some data keys are no longer used. `await fhir.removeUnusedDataKeys()` deletes them. It only considers keys more than 48 hours old (data keys are written with for at most 24 hours: `dataKeyMaxAgeMs` is capped there), and checks every table in the schema, so a key another store or process still uses is kept. It needs `DELETE` on `_data_keys`: run it from a maintenance script with an owner connection, not with the runtime role.
 
 ### Expunge
 
@@ -352,7 +353,7 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - `expunge` (off unless enabled) removes a resource's every version and index row in one transaction (history and index rows are copies of PHI), as its own policy-checked operation with a required reason, audited; audit rows are kept. It can run on its own connection, so the everyday runtime role never needs `DELETE` on resource data.
 - The optional audit table records every operation append-only, and writes a change and its audit row in one database transaction, so a committed change always has its record.
 
-What your app needs to provide: database encryption at rest (e.g. KMS-backed disks), the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). Planned in fhirforge: a strict mode that refuses plaintext rows once everything is encrypted. [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
+What your app needs to provide: database encryption at rest (e.g. KMS-backed disks) or fhirforge's `encryption` option with your KMS, the access policy itself, and either the audit table or another durable destination for audit events (plus long-term retention and review of them). [CLAUDE.md](CLAUDE.md) has the full requirements contributors follow.
 
 ## Development
 

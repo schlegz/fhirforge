@@ -156,6 +156,55 @@ describe('encryption at rest (PGlite, raw rows)', () => {
     expect((await rotated.history('Patient', p.id)).length).toBe(2);
   });
 
+  it('requireEncrypted refuses plaintext rows on read, but reencrypt() still converts them', async () => {
+    const plain = storeWith();
+    await plain.migrate();
+    const old = await plain.create(synthetic('Synthetic-Old'));
+    const { kms } = testKms();
+    const strict = storeWith(kms, { requireEncrypted: true });
+    await strict.migrate();
+    const read = await strict.read('Patient', old.id).catch((e: Error) => e);
+    expect((read as Error).message).toBe(`fhirforge: Patient/${old.id} is stored in plaintext, but encryption.requireEncrypted is on (run reencrypt())`);
+    await expect(strict.search('Patient', {})).rejects.toThrow('stored in plaintext');
+    expect(await strict.reencrypt()).toEqual({ Observation: 0, Patient: 1 });
+    expect((await strict.read('Patient', old.id)).name?.[0]?.family).toBe('Synthetic-Old');
+    expect((await strict.history('Patient', old.id)).length).toBe(1);
+  });
+
+  it('caps data key windows at 24 hours', () => {
+    const { kms } = testKms();
+    expect(() => storeWith(kms, { dataKeyMaxAgeMs: 25 * 60 * 60 * 1000 })).toThrow(/between 1 ms and 24 hours/);
+  });
+
+  it('removes data keys no row uses, older than the retention window, across every table in the schema', async () => {
+    const { kms } = testKms();
+    const fhir = storeWith(kms);
+    await fhir.migrate();
+    const p = await fhir.create(synthetic('Synthetic-Doe'));
+    // A key used only by Observations: a store that doesn't manage Observation must keep it.
+    await fhir.create({ resourceType: 'Observation', status: 'final', code: { text: 'hr' } });
+    const [first] = await raw(`SELECT id::text AS id FROM $S."_data_keys"`);
+    kms.keyId = 'test-master-2';
+    const patientsOnly = createFhirStore({
+      storage: pgliteStorage(db, { schema }),
+      fhir: r4,
+      resources: ['Patient'],
+      authorize: 'allow-all',
+      encryption: { keys: kms },
+    });
+    await patientsOnly.reencrypt({ olderThan: new Date(Date.now() + 1000) }); // Patient moves to a new key
+
+    expect(await patientsOnly.removeUnusedDataKeys()).toBe(0); // everything is too recent
+    await db.query(`UPDATE "${schema}"."_data_keys" SET created = now() - interval '3 days'`);
+    expect(await patientsOnly.removeUnusedDataKeys()).toBe(0); // the first key still encrypts the Observation
+
+    await db.query(`DELETE FROM "${schema}"."Observation"`); // test-only: drop the last reference to the first key
+    await db.query(`DELETE FROM "${schema}"."Observation_history"`);
+    expect(await patientsOnly.removeUnusedDataKeys()).toBe(1);
+    expect((await raw(`SELECT id::text AS id FROM $S."_data_keys"`)).map((r) => r.id)).not.toContain(first!.id);
+    expect((await patientsOnly.read('Patient', p.id)).name?.[0]?.family).toBe('Synthetic-Doe');
+  });
+
   it('fails a write when the KMS fails, and writes nothing', async () => {
     const fhir = storeWith({
       wrap: () => Promise.reject(new Error('KMS unavailable')),
