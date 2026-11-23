@@ -364,6 +364,16 @@ pnpm test          # build, unit + store tests (PGlite), type tests, example typ
 pnpm gen:r4        # regenerate packages/r4/src/generated from hl7.fhir.r4.core@4.0.1
 ```
 
+To create a local development database with every R4 resource type migrated (plus the audit and encryption tables):
+
+```bash
+pnpm dev:db                    # asks for the database name
+pnpm dev:db fhir_dev           # creates fhir_dev on the local Postgres (if missing) and migrates it
+pnpm dev:db fhir_dev --pglite  # no server: a PGlite database in .fhir-dev/fhir_dev
+```
+
+It connects to `FHIRFORGE_DEV_DATABASE_URL` (default `postgres://postgres@localhost:5432/postgres`; put the password there or in `PGPASSWORD`), refuses non-local servers, and is safe to re-run.
+
 To also run the store tests against a real Postgres (CI does this):
 
 ```bash

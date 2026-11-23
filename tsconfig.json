@@ -15,6 +15,7 @@
     "packages/codegen/test/**/*.ts",
     "packages/definitions/test/**/*.ts",
     "packages/r4/scripts/**/*.ts",
-    "packages/core/test/**/*.ts"
+    "packages/core/test/**/*.ts",
+    "scripts/dev-db.ts"
   ]
 }
