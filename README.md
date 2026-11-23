@@ -217,7 +217,7 @@ export { handler as GET, handler as POST, handler as PUT, handler as DELETE };
 
 In Express: `app.use('/fhir', toNodeHandler(createFhirHandler({ store, basePath: '/fhir', baseUrl, context })))`. Mount it before body parsers so it reads the body with its own size limit (if a parser already ran, the parsed `req.body` is used). Set `baseUrl`: without it, links are built from the client-supplied `Host` header.
 
-- Every request runs as `store.as(ctx)`: the same validation, `authorize` policy and `onAudit` as calls in code. Without a context it gets 401 and never reaches the store. `GET /metadata` (a CapabilityStatement built from the configured types and searchable parameters) is public.
+- Every request runs as `store.as(ctx)`: the same validation, `authorize` policy and `onAudit` as calls in code. For multi-tenancy, `store` can be a function of the request and context that picks the caller's store (see [Multi-tenancy](#multi-tenancy)). Without a context it gets 401 and never reaches the store. `GET /metadata` (a CapabilityStatement built from the configured types and searchable parameters) is public.
 - Routes: `POST /` for transaction and batch Bundles; `GET /Type?…` and `POST /Type/_search` for search (`searchset` Bundles with absolute `fullUrl`s, `self` / `next` links, and `_include`d resources as `search.mode: 'include'` entries); `POST /Type`; `GET`, `PUT` and `DELETE /Type/id`; `GET /Type/id/_history` and `/_history/v`. `If-Match` maps to `ifMatch`; responses carry `ETag`, `Last-Modified` and, on create, `Location`.
 - Responses are `application/fhir+json` with `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`. Errors are OperationOutcomes; unexpected errors become a generic 500 (pass `onError` to see them). Bodies over `maxBodyBytes` (default 10 MB) get 413.
 - Conditional operations: `POST /Type` with `If-None-Exist` (201 when created, 200 with the existing resource when one matches), `PUT /Type?…` and `DELETE /Type?…`.
@@ -270,6 +270,33 @@ createFhirStore({ storage, fhir: r4, resources: ['Patient'], authorize, search: 
 | date | the value at its stored precision: `birthdate=1974-12-25` | `ge` / `lt` / other prefixes, ranges, `_sort` |
 
 `:missing` isn't supported on blind parameters. Searches stop matching after the blind index key changes, until `reindex()` rewrites the hashes with the new key.
+
+### Multi-tenancy
+
+For several organizations in one deployment, give each tenant its own Postgres schema: its own tables, history, search indexes, audit table and, if you like, its own encryption keys. `tenantStores` creates and caches one store per tenant:
+
+```ts
+import { createFhirStore, tenantStores } from '@fhirforge/core';
+
+const tenants = tenantStores((tenant) =>
+  createFhirStore({
+    storage: postgresStorage(pool, { schema: `t_${tenant}` }), // one pool for every tenant
+    fhir: r4, resources, authorize,
+    audit: { table: true, actor: (ctx: Session) => ctx.userId },
+    encryption: { keys: kmsFor(tenant), blindIndexKey: () => blindKeyFor(tenant) }, // optional: keys per tenant
+  }),
+);
+
+await tenants.migrate(['acme', 'globex']); // at deploy time, or when you onboard a tenant
+const patient = await tenants.get(session.tenantId).as(session).read('Patient', id);
+```
+
+- **Tenant ids:** lowercase letters, digits and `_`, at most 40 characters (`TENANT_ID`; pass `pattern` to change it), so they're safe in a schema name. Anything else is a 400 that never echoes the id. `tenantStores` doesn't decide who belongs to which tenant: take the tenant from your authenticated session, never from a URL or header the caller controls.
+- **Isolation:** every query uses fully schema-qualified table names (no `search_path`), so a store can't reach another tenant's tables. With a separate KMS key and blind index key per tenant, one tenant's data is unreadable with another tenant's keys.
+- **Onboarding and offboarding:** `tenants.migrate([tenant])` creates the schema (it needs a role with DDL rights). To offboard, `DROP SCHEMA t_acme CASCADE` and `tenants.forget('acme')`.
+- **REST:** pass a function as the handler's `store`, and one handler serves every tenant: `createFhirHandler({ store: (request, ctx) => tenants.get(ctx.tenantId), context, basePath })`. A caller without a store gets 403; `/metadata` then needs a caller too.
+- **Cost:** stores are cached (up to `maxCached`, default 10,000, least recently used first) and share the compiled validation rules. Each configured resource type adds about ten tables per tenant: configure only the types you use if you expect many tenants. Locally, `pnpm dev:db name --schema t_acme,t_globex` creates tenant schemas.
+- **Alternatives:** a database per tenant works the same way (a pool per tenant in the factory), with stronger isolation and more connections. Shared tables with row-level security, for thousands of tenants, are on the roadmap.
 
 ### Storage layout
 
@@ -348,6 +375,7 @@ fhirforge is built for apps that store PHI, but it can't make an app HIPAA or SO
 - Every resource is validated against the base spec before it reaches the access policy or the database. Validation issues carry element paths only, element names from the input appear only if they look like FHIR names, and nesting depth and issue count are bounded so hostile JSON can't make it do unbounded work. Primitive formats use fixed, linear-time patterns, not regexes from the definitions.
 - Search index rows are copies of PHI. Per-parameter search policies let you leave sensitive fields unindexed (`none`), and index rows are deleted with their resource.
 - The REST handler (`@fhirforge/http`, both the fetch-style and the Node adapter) requires a caller context for every data request (401 otherwise), never returns stack traces, SQL or driver messages, sends `Cache-Control: no-store` so responses with PHI aren't cached, and caps request bodies (413).
+- Multi-tenancy by schema: each tenant's data lives in its own schema, reached only through its own store (`tenantStores`), optionally with its own encryption keys.
 - Access control is explicit: every operation goes through your `authorize` policy (default-deny) or a named `asSystem(reason)` bypass, and every operation can be audited through `onAudit`, without PHI in the events.
 - With `encryption`, resource bodies (current and history) are encrypted at rest with your KMS's keys (envelope encryption, AES-256-GCM, ciphertexts bound to their row); search index rows are protected per parameter: `blind` (keyed hashes, exact match only) or `none`.
 - `expunge` (off unless enabled) removes a resource's every version and index row in one transaction (history and index rows are copies of PHI), as its own policy-checked operation with a required reason, audited; audit rows are kept. It can run on its own connection, so the everyday runtime role never needs `DELETE` on resource data.
@@ -371,6 +399,7 @@ To create a local development database with every R4 resource type migrated (plu
 pnpm dev:db                    # asks for the database name
 pnpm dev:db fhir_dev           # creates fhir_dev on the local Postgres (if missing) and migrates it
 pnpm dev:db fhir_dev --pglite  # no server: a PGlite database in .fhir-dev/fhir_dev
+pnpm dev:db fhir_dev --schema t_acme,t_globex  # schema per tenant: migrate these schemas
 ```
 
 It connects to `FHIRFORGE_DEV_DATABASE_URL` (default `postgres://postgres@localhost:5432/postgres`; put the password there or in `PGPASSWORD`), refuses non-local servers, and is safe to re-run.

@@ -20,6 +20,7 @@ fhirforge/
 │   ├── core/          @fhirforge/core         createFhirStore, FhirError, the FhirStorage contract. Version-neutral. No I/O.
 │   │   ├── src/store.ts                       Scopes (as / asSystem), authorization checks, audit, data operations,
 │   │   │                                      write planning (planCreate / planUpdate / planDelete), transaction / batch.
+│   │   ├── src/tenancy.ts                     tenantStores: validated tenant ids, one cached store per tenant (schema per tenant).
 │   │   ├── src/encryption.ts                  Encryption at rest: KeyProvider, data-key ring, encryptedStorage (seal/open).
 │   │   ├── src/bundle.ts                      Bundle request parsing, urn:uuid reference resolution, response entries, limits.
 │   │   ├── src/access.ts                      authorize / onAudit types: AuthorizeRequest, StoreAuditEvent, StoreAction.
@@ -50,6 +51,7 @@ fhirforge/
 │                                              conditional.test.ts (conditional create/update/delete, races, Bundles),
 │                                              encryption.test.ts (encrypted rows, tampering, KMS, reencrypt, rotation),
 │                                              blind.test.ts (blind indexes: no plaintext, exact match, 400s, rotation),
+│                                              tenancy.test.ts (schema per tenant: isolation, ids, offboarding, REST),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -87,7 +89,7 @@ pnpm test                  # build, Vitest (definitions, codegen, core, store-te
 pnpm test:types            # type-level tests only (ts-expect-error / expect-type)
 pnpm test:examples [--no-types] [dir]  # type-check and validate FHIR JSON examples (default: packages/r4/test/examples)
 pnpm gen:r4                # regenerate packages/r4/src/generated from hl7.fhir.r4.core@4.0.1
-pnpm dev:db [name] [--pglite]  # create a local dev database (asks for the name) and migrate every R4 type
+pnpm dev:db [name] [--pglite] [--schema a,b]  # create a local dev database (asks for the name) and migrate every R4 type
 pnpm changeset             # record a change for the next release
 pnpm release:check         # build and run every publish check without publishing
 ```
@@ -185,6 +187,7 @@ Know what exists before you rely on it. Update this table when that changes.
 | REST handler (`@fhirforge/http`, fetch-style and `toNodeHandler`): caller context required (401), generic 500s, `Cache-Control: no-store`, body limit (413), JSON only | In place (tested in `http.test.ts`) |
 | Chained search and `_include` / `_revinclude`: chains run as policy-checked searches on the target type; each include is a policy-checked read; one chain level, ≤ 3 chains, ≤ 100 chain matches, ≤ 5 includes, ≤ 100 included | In place (tested in `links.test.ts`) |
 | Conditional create / update / delete: condition searched as the caller (policy, audit); re-checked under a `pg_advisory_xact_lock` on the canonical condition in the write transaction (412 if it changed); ≤ 10 condition parameters | In place (tested in `conditional.test.ts`, including concurrent creates) |
+| Multi-tenancy, schema per tenant (`tenantStores`, REST `store` resolver): tenant ids validated before reaching a schema name, never echoed; a missing store is 403 | In place (tested in `tenancy.test.ts`); RLS-based shared tables planned |
 | Bundle transactions: all writes in one database transaction (`writeAll`, rows locked in a fixed order); every entry validated, authorized, pinned and audited; ≤ 100 entries, ≤ 10 searches | In place (tested in `bundle.test.ts`) |
 | `authorize` policy (required; `'allow-all'` is the explicit opt-out), `store.as(ctx)`, `store.asSystem(reason)` | In place |
 | Denied reads/updates/deletes indistinguishable from missing (404); writes pinned to the approved version (412 on change) | In place (tested, including races) |
@@ -206,6 +209,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 - **Ids can be PHI.** Server-assigned ids are random UUIDs. Client-assigned ids (update-as-create) might be MRNs or other identifiers. Treat ids as sensitive in anything that leaves the process, and recommend in docs that apps don't use real-world identifiers as ids.
 - **No PHI in telemetry.** When tracing (e.g. OpenTelemetry) is added, spans may record resource type, operation, duration and status, never ids of client-assigned resources, content or parameters.
 - **No stack traces or internals in outcomes.** OperationOutcome `diagnostics` returned to clients must not include stack traces, SQL or driver messages. In `@fhirforge/http`, only `FhirError`s become their own outcome; everything else is a fixed "Internal server error" 500, and the error goes to the app's `onError`, never into the response or a log.
+- **Tenants:** a tenant id only reaches a schema name after `tenantStores` validated it (`TENANT_ID`), and error messages never contain it. The tenant must come from the caller's authenticated context, never from request data. Never set `search_path` or build unqualified table names: schema isolation relies on every query naming its schema.
 - **HTTP adapters** (`@fhirforge/http`: `createFhirHandler`, and `toNodeHandler` for Node's req/res): every data request needs a context from the app's `context` function (no default; 401 without it, before the store is touched). Responses carry `Cache-Control: no-store`. Bodies are read with a byte limit (`maxBodyBytes`) and never echoed in errors. Only `/metadata` is public; don't add other public routes. New framework support goes into `@fhirforge/http` as a thin adapter around `createFhirHandler` (like `toNodeHandler`), with structural types for the framework's objects, never a framework dependency.
 
 ### 2. SQL safety

@@ -10,8 +10,12 @@ import {
 } from '@fhirforge/core';
 
 export interface FhirHandlerOptions<M, Ctx> {
-  /** The store to serve. Every request runs as `store.as(ctx)`. */
-  store: FhirStore<M, Ctx>;
+  /**
+   * The store to serve. Every request runs as `store.as(ctx)`. For multi-tenancy, pass a
+   * function that picks the store from the caller's context (e.g. `tenants.get(ctx.tenantId)`);
+   * returning undefined is a 403. With a function, `/metadata` needs a context too.
+   */
+  store: FhirStore<M, Ctx> | ((request: Request, ctx: Ctx) => FhirStore<M, Ctx> | undefined | Promise<FhirStore<M, Ctx> | undefined>);
   /**
    * The path the handler is mounted at, e.g. `/fhir` for `app/fhir/[[...path]]/route.ts`.
    * Requests outside it get 404.
@@ -59,8 +63,18 @@ const INSTANCE_INTERACTIONS = ['read', 'vread', 'update', 'delete', 'history-ins
  * ```
  */
 export function createFhirHandler<M, Ctx>(options: FhirHandlerOptions<M, Ctx>): FhirHandler {
-  const store = options.store as unknown as FhirStore<Record<string, AnyResource>, Ctx>;
-  if (!store || typeof store.as !== 'function') throw new Error('createFhirHandler: `store` is required');
+  type AnyStore = FhirStore<Record<string, AnyResource>, Ctx>;
+  const fixed = typeof options.store === 'function' ? undefined : (options.store as unknown as AnyStore);
+  const resolve = typeof options.store === 'function' ? (options.store as unknown as (r: Request, c: Ctx) => AnyStore | undefined | Promise<AnyStore | undefined>) : undefined;
+  if (!resolve && (!fixed || typeof fixed.as !== 'function')) throw new Error('createFhirHandler: `store` is required');
+  /** The caller's context (401 without one), and the store it may use (403 without one). */
+  const caller = async (request: Request) => {
+    const ctx = await options.context(request);
+    if (ctx === undefined) throw new FhirError(401, 'login', 'Authentication required');
+    const store = fixed ?? (await resolve!(request, ctx));
+    if (!store || typeof store.as !== 'function') throw FhirError.forbidden('No store for this caller');
+    return { ctx, store };
+  };
   if (typeof options.context !== 'function') {
     throw new Error('createFhirHandler: `context` is required (return the caller context from your auth)');
   }
@@ -83,11 +97,12 @@ export function createFhirHandler<M, Ctx>(options: FhirHandlerOptions<M, Ctx>): 
 
       if (segments.length === 1 && segments[0] === 'metadata') {
         allow(method, ['GET']);
+        // Public with one store; with a per-caller store, it describes the caller's store.
+        const store = fixed ?? (await caller(request)).store;
         return json(200, capabilityStatement(store, base, started), { 'Cache-Control': 'no-cache' });
       }
 
-      const ctx = await options.context(request);
-      if (ctx === undefined) throw new FhirError(401, 'login', 'Authentication required');
+      const { ctx, store } = await caller(request);
       const ops = store.as(ctx);
       const body = () => readJson(request, maxBody);
       const [type, id, history, versionId, ...rest] = segments;

@@ -13,6 +13,7 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 - **Security:** TLS enforcement for remote `pg` Pools; required `authorize` policy with `as(ctx)` / `asSystem(reason)`; `onAudit`; denied reads hidden as 404; writes pinned to the approved version; errors never echo values.
 - **Runtime validation** (roadmap item 2): rules compiled from the StructureDefinitions into `@fhirforge/r4`'s `validation`, walked by `core/src/validation/`. Checks unknown elements, cardinality, types, choice elements, required `code` bindings, primitive formats and contained resources. `create` / `update` validate before the policy check; 400 with one path-only issue per problem. All 5,293 valid R4 spec examples pass; the 16 that break the base spec are rejected (`pnpm test:examples --no-types <examples package>`).
 - **Release pipeline:** Changesets, `scripts/publish.mjs` with tarball checks, `release.yml` for trusted publishing.
+- **Multi-tenancy, schema per tenant:** `tenantStores` (validated tenant ids, one cached store per tenant, `migrate` across tenants), a per-caller `store` in the REST handler, `pnpm dev:db --schema`, and compiled validators shared between stores.
 - **Strict encryption mode and data key cleanup:** `encryption.requireEncrypted` refuses plaintext bodies on read (`reencrypt` still converts them); `removeUnusedDataKeys()` deletes data keys older than 48 h that no table in the schema references (data key windows capped at 24 h).
 - **Blind indexes:** the `blind` search policy (HMAC-SHA-256 of normalized values in `<Type>_blind`, app key `encryption.blindIndexKey` with id per row, `reindex()` on rotation); exact match only for string, token and date, everything else a 400. With body encryption and `blind` / `none` policies, the database holds no readable copy of chosen fields.
 - **Encryption at rest (bodies)** ([design/encryption.md](design/encryption.md), defaults accepted): `encryption: { keys }` envelope-encrypts every body, current and history, with AES-256-GCM and app-KMS-wrapped data keys, ciphertexts bound to their row; `reencrypt()` encrypts legacy rows and rotates. Plaintext rows stay readable (mixed mode).
@@ -39,7 +40,7 @@ Nothing queued: pick the next item from **Later**.
 - **Full examples type-check:** 32 of 5,309 official R4 examples fail `pnpm test:examples` type-checking, because the types are stricter than the base spec (reference targets, a primitive's value required next to its `_extension`). Decide whether to relax the types or keep a known-failures list like the runtime check.
 - **More FHIR versions:** `@fhirforge/r5` from `hl7.fhir.r5.core`.
 - **Search gaps:** chains deeper than one level, `_include:iterate`, `_has`, batching include reads into one query, composite parameters, `:text`, `:above` / `:below`, the `ap` prefix, `_total`, and the expressions listed in `unsupportedSearchParameters`.
-- **Optional multi-tenancy** with Postgres row-level security.
+- **Multi-tenancy with shared tables** and Postgres row-level security, for thousands of tenants (schema per tenant is done).
 
 ## Release notes for maintainers
 

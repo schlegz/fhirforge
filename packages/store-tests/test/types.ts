@@ -1,6 +1,6 @@
 // Type-level tests for the store API, checked by `pnpm test:types`. Lines with a
 // ts-expect-error directive must fail to compile, or the build fails.
-import { createFhirStore, type BundleResponse, type FhirStorage, type Stored } from '@fhirforge/core';
+import { createFhirStore, tenantStores, type BundleResponse, type FhirStorage, type Stored } from '@fhirforge/core';
 import { r4, type Bundle, type Observation, type Patient } from '@fhirforge/r4';
 import { createFhirHandler, type FhirHandler } from '@fhirforge/http';
 import { expectTypeOf } from 'expect-type';
@@ -20,6 +20,16 @@ export function httpHandler(): void {
   void GET;
   // @ts-expect-error the context must match the store's Ctx
   createFhirHandler({ store: guarded, basePath: '/fhir', context: () => ({ role: 'x' }) });
+
+  // Multi-tenancy: the store can be picked per caller, typed by the same context.
+  const tenants = tenantStores(() => guarded);
+  const perTenant = createFhirHandler({
+    store: (_request, ctx: Session) => (ctx.userId ? tenants.get('acme') : undefined),
+    basePath: '/fhir',
+    context: (): Session | undefined => ({ userId: 'u1' }),
+  });
+  expectTypeOf(perTenant).toEqualTypeOf<FhirHandler>();
+  expectTypeOf(tenants.get('acme')).toEqualTypeOf<typeof guarded>();
 }
 
 export async function bundles(): Promise<void> {
