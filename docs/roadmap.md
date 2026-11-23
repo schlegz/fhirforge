@@ -22,7 +22,9 @@ _Last updated: 2026-11-22, after the REST handler (`@fhirforge/http`)._
 
 ## Next, in order
 
-Nothing queued: pick the next item from **Later**.
+### 1. Conditional create, update and delete
+
+`If-None-Exist`, `PUT Type?…`, `DELETE Type?…` in the store, Bundles and the REST handler, race-free among conditional writes. Design draft for review: [design/conditional-operations.md](design/conditional-operations.md).
 
 ## Later
 
