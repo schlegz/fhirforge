@@ -76,6 +76,9 @@ function pointCondition(prefix: Prefix, col: string, lazyValue: Lazy, lazyLow: L
 
 function condition(sql: Sql, c: SearchCondition): string {
   switch (c.kind) {
+    case 'blind':
+      // Only hashes under the current key match: after rotating the key, reindex.
+      return `(i.key_id = ${sql.bind(c.keyId)} AND i.hash = ${sql.bind(c.hash)})`;
     case 'string':
       if (c.mode === 'exact') return `i.value_exact = ${sql.bind(c.value)}`;
       if (c.mode === 'contains') return `i.value_norm LIKE ${sql.bind(`%${likeEscape(c.value)}%`)} ESCAPE '\\'`;
@@ -234,6 +237,7 @@ const COLUMNS: Record<IndexKind, string> = {
   number: 'value',
   quantity: 'value, system, code',
   uri: 'value',
+  blind: 'key_id, hash',
 };
 
 function columnValues(r: IndexRow): unknown[] {
@@ -252,6 +256,8 @@ function columnValues(r: IndexRow): unknown[] {
       return [r.value, r.system, r.code];
     case 'uri':
       return [r.value];
+    case 'blind':
+      return [r.keyId, r.hash];
   }
 }
 

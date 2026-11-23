@@ -1,8 +1,8 @@
 # Design: field-level encryption and blind indexes
 
-Status: **body encryption implemented** (2026-11-23) with the proposed answers to every open question; **blind indexes next**.
+Status: **implemented** (2026-11-23), body encryption and blind indexes, with the proposed answers to every open question.
 
-Differences from the draft: `seal` runs inside the adapter's write, after the version is assigned (the version is still bound as AAD, with no prediction needed); KMS calls stay outside transactions through `prepare()`. `reencrypt` refreshes the data key between resources. Removing unused data keys is not done yet.
+Differences from the draft: `seal` runs inside the adapter's write, after the version is assigned (the version is still bound as AAD, with no prediction needed); KMS calls stay outside transactions through `prepare()`. `reencrypt` refreshes the data key between resources. Removing unused data keys is not done yet. Blind index rows store the hash as base64 text; token rows get two hashes (`code`, and `system|code` or `|code`).
 
 ## Why
 

@@ -4,7 +4,7 @@ import type { SearchQuery } from './search/query.js';
 import type { AnyResource, MigrationResult } from './types.js';
 
 /** Computes a resource's search index rows. Called by the adapter on the stamped resource, inside the write transaction. */
-export type Indexer = (resource: AnyResource & { id: string }) => IndexRow[];
+export type Indexer = (resource: AnyResource & { id: string }) => IndexRow[] | Promise<IndexRow[]>;
 
 export interface WriteOptions {
   /** When set, the adapter replaces the resource's index rows in the same transaction. */

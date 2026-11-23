@@ -91,6 +91,15 @@ export function migrationsFor(
         (table) => `ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS enc bytea, ADD COLUMN IF NOT EXISTS dek_id uuid`,
       ),
     });
+    // Blind indexes: keyed hashes of `blind` parameters' normalized values (no plaintext).
+    migrations.push({
+      id: `resource:${resourceType}:4`,
+      statements: [
+        `CREATE TABLE IF NOT EXISTS ${t.index.blind} (\n  ${fk},\n  key_id text NOT NULL,\n  hash text NOT NULL\n)`,
+        `CREATE INDEX IF NOT EXISTS ${idx('blind_resource_idx')} ON ${t.index.blind} (resource_id)`,
+        `CREATE INDEX IF NOT EXISTS ${idx('blind_lookup_idx')} ON ${t.index.blind} (param, hash)`,
+      ],
+    });
   }
   return migrations;
 }

@@ -39,6 +39,12 @@ export interface EncryptionOptions {
   dataKeyMaxUses?: number;
   /** Unwrapped data keys kept in memory for reads. Default 1,000. */
   dataKeyCacheSize?: number;
+  /**
+   * The key for `blind` search parameters (HMAC-SHA-256, at least 32 bytes): a separate secret
+   * from the data keys, e.g. from your secrets manager. Its `id` is stored on each blind index
+   * row; after rotating it, run `reindex()`. Required to use the `blind` search policy.
+   */
+  blindIndexKey?: () => Promise<{ id: string; key: Uint8Array }>;
 }
 
 /** Format byte of an encrypted body: AES-256-GCM, 96-bit nonce, 128-bit tag. */

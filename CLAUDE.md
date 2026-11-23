@@ -23,6 +23,7 @@ fhirforge/
 │   │   ├── src/encryption.ts                  Encryption at rest: KeyProvider, data-key ring, encryptedStorage (seal/open).
 │   │   ├── src/bundle.ts                      Bundle request parsing, urn:uuid reference resolution, response entries, limits.
 │   │   ├── src/access.ts                      authorize / onAudit types: AuthorizeRequest, StoreAuditEvent, StoreAction.
+│   │   ├── src/search/blind.ts                Blind indexes: keyed hashes of blind parameters, and the queries that can use them.
 │   │   ├── src/search/                        Index extraction (index-rows.ts), query parsing (query.ts), value
 │   │   │                                      normalization (values.ts), compiled-parameter types (types.ts),
 │   │   │                                      chains and _include / _revinclude parsing and limits (links.ts).
@@ -48,6 +49,7 @@ fhirforge/
 │                                              expunge.test.ts (expunge, pinning, audit rows kept, grants),
 │                                              conditional.test.ts (conditional create/update/delete, races, Bundles),
 │                                              encryption.test.ts (encrypted rows, tampering, KMS, reencrypt, rotation),
+│                                              blind.test.ts (blind indexes: no plaintext, exact match, 400s, rotation),
 │                                              validation.test.ts (each rule type), access.test.ts
 │                                              (authorize / onAudit, races), transport.test.ts,
 │                                              types.ts (type-level API tests), readme.ts (README quick start).
@@ -186,8 +188,8 @@ Know what exists before you rely on it. Update this table when that changes.
 | `onAudit` hook: every data operation, including denials and failures, without content or search values | In place |
 | Runtime validation of every write against the base spec (paths-only issues, ≤ 100 issues, nesting depth ≤ 64, linear-time primitive checks) | In place (tested in `validation.test.ts`, `store.test.ts`, `access.test.ts`) |
 | Built-in append-only audit table (`audit: { table: true, actor }`): rows written in the write's transaction; INSERT-only for the runtime role; triggers refuse UPDATE / DELETE / TRUNCATE | In place (tested in `audit.test.ts`, including a restricted role on Postgres) |
-| Encryption at rest (`encryption: { keys }`): bodies, current and history, envelope encryption with app-KMS-wrapped data keys, AES-256-GCM, random nonces, `Type/id/_history/version` as AAD, data key id per row; `reencrypt()` for legacy rows and rotation | In place for bodies (tested in `encryption.test.ts`); blind indexes and a strict no-plaintext mode planned |
-| Per-search-parameter index policy | Partly: `plaintext` and `none` in place; `blind` planned (rejected at `createFhirStore`) |
+| Encryption at rest (`encryption: { keys }`): bodies, current and history, envelope encryption with app-KMS-wrapped data keys, AES-256-GCM, random nonces, `Type/id/_history/version` as AAD, data key id per row; `reencrypt()` for legacy rows and rotation | In place for bodies (tested in `encryption.test.ts`); a strict no-plaintext mode planned |
+| Per-search-parameter index policy | In place: `plaintext`, `none`, and `blind` (HMAC-SHA-256 of the normalized value, app-supplied key with id per row, exact match only; string, token and date) |
 | Expunge (`expunge(type, id, { reason })`, opt-in via `createFhirStore({ expunge })`, optionally on its own privileged storage): every version and index row in one transaction, row locked, pinned, policy action `expunge`, reason required and audited; audit rows kept | In place (tested in `expunge.test.ts`, including a DELETE-less runtime role on Postgres) |
 | Multi-tenancy with Postgres row-level security | Planned (optional) |
 
@@ -228,7 +230,7 @@ Resource content, identifiers, names, birth dates, addresses, phone numbers, ema
 - **At rest:** fhirforge relies on database/disk encryption (e.g. RDS or Cloud SQL with KMS keys) and documents it as a requirement. Don't implement custom disk-level crypto.
 - **Bodies (in place):** `core/src/encryption.ts` wraps the storage adapter (`encryptedStorage`): `seal` encrypts the stamped resource inside the adapter's write (after the version is known), `open` decrypts on read in core. Adapters only move base64 bytes and never see keys. Keys come from the app's `KeyProvider` (KMS); data keys are wrapped, stored in `_data_keys`, reused for a bounded window, cached unwrapped for reads, and never cause a KMS call inside a database transaction (`prepare()` runs before). Anything that opens rows inside a transaction (reindex, reencrypt) must attach the wrapped key read on that transaction's connection (`withKey` in `pg/src/storage.ts`). A KMS or decryption failure fails the operation; never fall back to plaintext. Decryption errors name type and id only. Keys never go to the database: don't use `pgcrypto` with keys in SQL.
 - Use vetted primitives only: Node's `crypto` (AES-256-GCM with a random 96-bit nonce per encryption) or a well-known library. Never invent a cipher mode, reuse nonces, or use ECB, unauthenticated CBC, MD5 or SHA-1 for security purposes.
-- **Search indexes hold readable copies of PHI.** Each search parameter gets a policy (`createFhirStore({ search: { policy } })`, keyed `ResourceType.code`): `plaintext` (full search), `blind` (HMAC of the normalized value with a separate key; exact match only) or `none`. Decided: `Patient.name` and `Patient.birthdate` default to `plaintext`, with `blind` available per parameter. Blind indexes support only exact match: document which searches stop working. Don't add order-preserving encryption.
+- **Search indexes hold readable copies of PHI.** Each search parameter gets a policy (`createFhirStore({ search: { policy } })`, keyed `ResourceType.code`): `plaintext` (full search), `blind` or `none`. `blind` (`core/src/search/blind.ts`) stores HMAC-SHA-256(app key, parameter + normalized value) in `<Type>_blind`, with the key id on each row; the key comes from `encryption.blindIndexKey`, separate from the data keys, with no default. Blind parameters answer exact matches only (string: whole normalized value; token: `code`, `system|code`, `|code`; date: the stored precision). Every other modifier, prefix, `:missing` or `_sort` on them must be a 400, never a scan or an approximation. Searches use the current key id only, so rotating the key needs `reindex()`. Decided: `Patient.name` and `Patient.birthdate` default to `plaintext`. Don't add order-preserving encryption.
 
 ### 6. Integrity, history and retention
 

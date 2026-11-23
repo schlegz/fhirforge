@@ -20,7 +20,7 @@ export function checkResourceType(resourceType: string): string {
   return resourceType;
 }
 
-export const INDEX_KINDS = ['string', 'token', 'date', 'reference', 'number', 'quantity', 'uri'] as const;
+export const INDEX_KINDS = ['string', 'token', 'date', 'reference', 'number', 'quantity', 'uri', 'blind'] as const;
 export type IndexKind = (typeof INDEX_KINDS)[number];
 
 export interface Tables {

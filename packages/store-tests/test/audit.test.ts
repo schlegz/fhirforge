@@ -237,7 +237,7 @@ describe.skipIf(!url)('audit table privileges (Postgres)', () => {
       `CREATE ROLE "${role}" NOLOGIN`,
       `GRANT USAGE ON SCHEMA ${s} TO "${role}"`,
       `GRANT SELECT, INSERT, UPDATE ON ${s}."Patient", ${s}."Patient_history" TO "${role}"`,
-      `GRANT SELECT, INSERT, UPDATE, DELETE ON ${['string', 'token', 'date', 'reference', 'number', 'quantity', 'uri'].map((k) => `${s}."Patient_${k}"`).join(', ')} TO "${role}"`,
+      `GRANT SELECT, INSERT, UPDATE, DELETE ON ${['string', 'token', 'date', 'reference', 'number', 'quantity', 'uri', 'blind'].map((k) => `${s}."Patient_${k}"`).join(', ')} TO "${role}"`,
       `GRANT INSERT ON ${s}."_audit" TO "${role}"`,
     ]) {
       await pool.query(sql);

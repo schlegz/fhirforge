@@ -200,7 +200,7 @@ describe.skipIf(!url)('expunge privileges (Postgres)', () => {
     const config = { fhir: r4, resources: ['Patient'] as const, authorize: 'allow-all' as const };
     await createFhirStore({ ...config, storage: postgresStorage(pool, { schema }) }).migrate();
     const s = `"${schema}"`;
-    const index = ['string', 'token', 'date', 'reference', 'number', 'quantity', 'uri'].map((k) => `${s}."Patient_${k}"`).join(', ');
+    const index = ['string', 'token', 'date', 'reference', 'number', 'quantity', 'uri', 'blind'].map((k) => `${s}."Patient_${k}"`).join(', ');
     for (const sql of [
       `CREATE ROLE "${role}" NOLOGIN`,
       `GRANT USAGE ON SCHEMA ${s} TO "${role}"`,

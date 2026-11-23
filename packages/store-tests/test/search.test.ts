@@ -312,11 +312,11 @@ describe.each(backends)('search on $name', (backend) => {
       expect((await store.search('Patient', { family: 'policy' })).total).toBe(1);
     });
 
-    it('rejects blind indexing (planned) and unknown policy keys at creation', async () => {
+    it('requires a blind index key for blind parameters, and rejects unknown policy keys at creation', async () => {
       const storage = await backend.storage();
       expect(() =>
         createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.name': 'blind' } } }),
-      ).toThrow(/not implemented/);
+      ).toThrow(/needs `encryption.blindIndexKey`/);
       expect(() =>
         createFhirStore({ authorize: 'allow-all', storage, fhir: r4, resources: ['Patient'], search: { policy: { 'Patient.nope': 'none' } } }),
       ).toThrow(/unknown parameter/);

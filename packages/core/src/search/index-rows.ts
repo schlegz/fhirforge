@@ -15,7 +15,9 @@ export type IndexRow =
   | { kind: 'reference'; param: string; targetType: string | null; targetId: string | null; reference: string }
   | { kind: 'number'; param: string; value: string }
   | { kind: 'quantity'; param: string; value: string; system: string | null; code: string | null }
-  | { kind: 'uri'; param: string; value: string };
+  | { kind: 'uri'; param: string; value: string }
+  /** A `blind` parameter: a keyed hash of the normalized value (base64), never the value. */
+  | { kind: 'blind'; param: string; keyId: string; hash: string };
 
 /** Search policy per parameter, keyed `ResourceType.code` (e.g. `Patient.birthdate`). */
 export type SearchPolicy = 'plaintext' | 'blind' | 'none';
